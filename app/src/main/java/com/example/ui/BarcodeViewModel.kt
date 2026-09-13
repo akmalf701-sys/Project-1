@@ -1,6 +1,8 @@
 package com.example.ui
 
 import android.content.Context
+import android.media.AudioManager
+import android.media.ToneGenerator
 import android.net.Uri
 import android.os.Build
 import android.os.VibrationEffect
@@ -75,14 +77,81 @@ class BarcodeViewModel(
     private val _hapticsEnabled = MutableStateFlow(true)
     val hapticsEnabled = _hapticsEnabled.asStateFlow()
 
+    // Sound beep ("tut") toggle (Default: true)
+    private val _soundEnabled = MutableStateFlow(true)
+    val soundEnabled = _soundEnabled.asStateFlow()
+
+    // Duplicate prevention toggle (Default: true)
+    private val _preventDuplicates = MutableStateFlow(true)
+    val preventDuplicates = _preventDuplicates.asStateFlow()
+
     // Event notifications for UI (e.g. snackbar or dialog when item scanned)
     private val _scanEvent = MutableSharedFlow<BarcodeEntity>()
     val scanEvent = _scanEvent.asSharedFlow()
 
+    // Notification when duplicate barcode is scanned and rejected
+    private val _duplicateEvent = MutableSharedFlow<String>()
+    val duplicateEvent = _duplicateEvent.asSharedFlow()
+
     // Cooldown tracker to prevent duplicate floods in rapid succession
     private var lastScannedCode = ""
     private var lastScannedTime = 0L
-    private val scanCooldownMs = 1500L
+    private val scanCooldownMs = 1200L
+
+    // ToneGenerator for the classic barcode scanner "tut" beep sound
+    @Volatile
+    private var toneGenerator: ToneGenerator? = null
+
+    private fun getToneGenerator(): ToneGenerator? {
+        if (toneGenerator == null) {
+            synchronized(this) {
+                if (toneGenerator == null) {
+                    toneGenerator = try {
+                        ToneGenerator(AudioManager.STREAM_MUSIC, 100)
+                    } catch (_: Exception) {
+                        try {
+                            ToneGenerator(AudioManager.STREAM_NOTIFICATION, 100)
+                        } catch (_: Exception) {
+                            null
+                        }
+                    }
+                }
+            }
+        }
+        return toneGenerator
+    }
+
+    /**
+     * Plays the classic retail scanner beep ("tut") sound
+     */
+    fun playScanBeep() {
+        if (!_soundEnabled.value) return
+        try {
+            // TONE_PROP_BEEP is 1000Hz pure tone - classic supermarket / POS scanner "tut"
+            getToneGenerator()?.startTone(ToneGenerator.TONE_PROP_BEEP, 130)
+        } catch (_: Exception) {
+            try {
+                toneGenerator = ToneGenerator(AudioManager.STREAM_MUSIC, 100)
+                toneGenerator?.startTone(ToneGenerator.TONE_PROP_BEEP, 130)
+            } catch (_: Exception) {}
+        }
+    }
+
+    /**
+     * Plays warning tone for duplicate scan
+     */
+    fun playDuplicateBeep() {
+        if (!_soundEnabled.value) return
+        try {
+            // Double tone alert for duplicate notification
+            getToneGenerator()?.startTone(ToneGenerator.TONE_PROP_BEEP2, 220)
+        } catch (_: Exception) {
+            try {
+                toneGenerator = ToneGenerator(AudioManager.STREAM_MUSIC, 100)
+                toneGenerator?.startTone(ToneGenerator.TONE_PROP_BEEP2, 220)
+            } catch (_: Exception) {}
+        }
+    }
 
     fun toggleTorch() {
         _isTorchOn.value = !_isTorchOn.value
@@ -100,39 +169,61 @@ class BarcodeViewModel(
         _hapticsEnabled.value = !_hapticsEnabled.value
     }
 
+    fun toggleSound() {
+        _soundEnabled.value = !_soundEnabled.value
+    }
+
+    fun togglePreventDuplicates() {
+        _preventDuplicates.value = !_preventDuplicates.value
+    }
+
     fun setSearchQuery(query: String) {
         _searchQuery.value = query
+    }
+
+    suspend fun isBarcodeRegistered(code: String): Boolean {
+        return repository.findByCode(code.trim()) != null
     }
 
     /**
      * Called when Camera Analyzer detects a barcode
      */
     fun onBarcodeDetected(code: String, format: String) {
+        val trimmedCode = code.trim()
+        if (trimmedCode.isBlank()) return
+
         val now = System.currentTimeMillis()
-        if (code == lastScannedCode && (now - lastScannedTime) < scanCooldownMs) {
+        if (trimmedCode == lastScannedCode && (now - lastScannedTime) < scanCooldownMs) {
             return
         }
 
-        lastScannedCode = code
+        lastScannedCode = trimmedCode
         lastScannedTime = now
-
-        triggerHapticFeedback()
 
         viewModelScope.launch {
             // Check if barcode already exists in database
-            val existing = repository.findByCode(code)
+            val existing = repository.findByCode(trimmedCode)
             if (existing != null) {
-                // If already scanned, increment quantity by 1 and update timestamp
-                val updated = existing.copy(
-                    quantity = existing.quantity + 1,
-                    timestamp = System.currentTimeMillis()
-                )
-                repository.update(updated)
-                _scanEvent.emit(updated)
+                if (_preventDuplicates.value) {
+                    // Prevent duplicate: do NOT insert duplicate or update database
+                    playDuplicateBeep()
+                    triggerHapticFeedback(isError = true)
+                    _duplicateEvent.emit(trimmedCode)
+                } else {
+                    // Duplicate allowed: increment quantity
+                    val updated = existing.copy(
+                        quantity = existing.quantity + 1,
+                        timestamp = System.currentTimeMillis()
+                    )
+                    repository.update(updated)
+                    playScanBeep()
+                    triggerHapticFeedback(isError = false)
+                    _scanEvent.emit(updated)
+                }
             } else {
-                // Create new entry
+                // New unique barcode: insert into database
                 val newItem = BarcodeEntity(
-                    code = code,
+                    code = trimmedCode,
                     format = format,
                     title = "",
                     quantity = 1,
@@ -140,6 +231,8 @@ class BarcodeViewModel(
                     timestamp = System.currentTimeMillis()
                 )
                 val id = repository.insert(newItem)
+                playScanBeep()
+                triggerHapticFeedback(isError = false)
                 _scanEvent.emit(newItem.copy(id = id))
             }
         }
@@ -148,22 +241,40 @@ class BarcodeViewModel(
     /**
      * Add manual barcode (if barcode cannot be scanned or camera is unavailable)
      */
-    fun addManualBarcode(code: String, format: String = "MANUAL", title: String = "", qty: Int = 1, note: String = "") {
-        if (code.isBlank()) return
+    fun addManualBarcode(
+        code: String,
+        format: String = "MANUAL",
+        title: String = "",
+        qty: Int = 1,
+        note: String = "",
+        onDuplicate: (() -> Unit)? = null
+    ) {
+        val trimmedCode = code.trim()
+        if (trimmedCode.isBlank()) return
         viewModelScope.launch {
-            val existing = repository.findByCode(code)
+            val existing = repository.findByCode(trimmedCode)
             if (existing != null) {
-                val updated = existing.copy(
-                    quantity = existing.quantity + qty,
-                    title = if (title.isNotBlank()) title else existing.title,
-                    note = if (note.isNotBlank()) note else existing.note,
-                    timestamp = System.currentTimeMillis()
-                )
-                repository.update(updated)
-                _scanEvent.emit(updated)
+                if (_preventDuplicates.value) {
+                    playDuplicateBeep()
+                    triggerHapticFeedback(isError = true)
+                    _duplicateEvent.emit(trimmedCode)
+                    onDuplicate?.invoke()
+                    return@launch
+                } else {
+                    val updated = existing.copy(
+                        quantity = existing.quantity + qty,
+                        title = if (title.isNotBlank()) title else existing.title,
+                        note = if (note.isNotBlank()) note else existing.note,
+                        timestamp = System.currentTimeMillis()
+                    )
+                    repository.update(updated)
+                    playScanBeep()
+                    triggerHapticFeedback(isError = false)
+                    _scanEvent.emit(updated)
+                }
             } else {
                 val newItem = BarcodeEntity(
-                    code = code.trim(),
+                    code = trimmedCode,
                     format = format,
                     title = title.trim(),
                     quantity = if (qty > 0) qty else 1,
@@ -171,6 +282,8 @@ class BarcodeViewModel(
                     timestamp = System.currentTimeMillis()
                 )
                 val id = repository.insert(newItem)
+                playScanBeep()
+                triggerHapticFeedback(isError = false)
                 _scanEvent.emit(newItem.copy(id = id))
             }
         }
@@ -193,8 +306,19 @@ class BarcodeViewModel(
                         val raw = first.rawValue ?: ""
                         if (raw.isNotBlank()) {
                             val format = BarcodeAnalyzer.getFormatName(first.format)
-                            onBarcodeDetected(raw, format)
-                            onResult(true, "Berhasil scan: $raw ($format)")
+                            val trimmed = raw.trim()
+                            viewModelScope.launch {
+                                val existing = repository.findByCode(trimmed)
+                                if (existing != null && _preventDuplicates.value) {
+                                    playDuplicateBeep()
+                                    triggerHapticFeedback(isError = true)
+                                    _duplicateEvent.emit(trimmed)
+                                    onResult(false, "Barcode $trimmed sudah terdaftar di daftar Excel (Duplikat dicegah).")
+                                } else {
+                                    onBarcodeDetected(raw, format)
+                                    onResult(true, "Berhasil scan: $raw ($format)")
+                                }
+                            }
                         } else {
                             onResult(false, "Barcode terdeteksi tetapi nilainya kosong.")
                         }
@@ -235,32 +359,52 @@ class BarcodeViewModel(
         }
     }
 
-    private fun triggerHapticFeedback() {
+    private fun triggerHapticFeedback(isError: Boolean = false) {
         if (!_hapticsEnabled.value) return
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 val vibratorManager = appContext.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? VibratorManager
                 val defaultVibrator = vibratorManager?.defaultVibrator
                 if (defaultVibrator?.hasVibrator() == true) {
-                    defaultVibrator.vibrate(
-                        VibrationEffect.createOneShot(70, VibrationEffect.DEFAULT_AMPLITUDE)
-                    )
+                    if (isError) {
+                        val timings = longArrayOf(0, 70, 80, 70)
+                        val amplitudes = intArrayOf(0, VibrationEffect.DEFAULT_AMPLITUDE, 0, VibrationEffect.DEFAULT_AMPLITUDE)
+                        defaultVibrator.vibrate(VibrationEffect.createWaveform(timings, amplitudes, -1))
+                    } else {
+                        defaultVibrator.vibrate(
+                            VibrationEffect.createOneShot(70, VibrationEffect.DEFAULT_AMPLITUDE)
+                        )
+                    }
                 }
             } else {
                 @Suppress("DEPRECATION")
                 val vibrator = appContext.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
                 if (vibrator?.hasVibrator() == true) {
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                        vibrator.vibrate(VibrationEffect.createOneShot(70, VibrationEffect.DEFAULT_AMPLITUDE))
+                        if (isError) {
+                            val timings = longArrayOf(0, 70, 80, 70)
+                            val amplitudes = intArrayOf(0, VibrationEffect.DEFAULT_AMPLITUDE, 0, VibrationEffect.DEFAULT_AMPLITUDE)
+                            vibrator.vibrate(VibrationEffect.createWaveform(timings, amplitudes, -1))
+                        } else {
+                            vibrator.vibrate(VibrationEffect.createOneShot(70, VibrationEffect.DEFAULT_AMPLITUDE))
+                        }
                     } else {
                         @Suppress("DEPRECATION")
-                        vibrator.vibrate(70)
+                        vibrator.vibrate(if (isError) 150 else 70)
                     }
                 }
             }
         } catch (_: Exception) {
             // Ignore if vibration is not supported or not permitted
         }
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        try {
+            toneGenerator?.release()
+            toneGenerator = null
+        } catch (_: Exception) {}
     }
 
     class Factory(

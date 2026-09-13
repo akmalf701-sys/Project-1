@@ -35,13 +35,16 @@ import androidx.compose.ui.unit.dp
 @Composable
 fun ManualInputDialog(
     onDismiss: () -> Unit,
-    onSubmit: (code: String, title: String, qty: Int, note: String) -> Unit
+    onSubmit: (code: String, title: String, qty: Int, note: String) -> Unit,
+    preventDuplicates: Boolean = true,
+    existingCodes: Set<String> = emptySet()
 ) {
     var code by remember { mutableStateOf("") }
     var title by remember { mutableStateOf("") }
     var note by remember { mutableStateOf("") }
     var quantityText by remember { mutableStateOf("1") }
     var showError by remember { mutableStateOf(false) }
+    var duplicateError by remember { mutableStateOf(false) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -59,18 +62,25 @@ fun ManualInputDialog(
                     .padding(vertical = 4.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
+                val isCodeDuplicate = preventDuplicates && existingCodes.contains(code.trim())
+
                 OutlinedTextField(
                     value = code,
                     onValueChange = {
                         code = it
                         showError = false
+                        duplicateError = false
                     },
                     label = { Text("Kode Barcode *") },
                     placeholder = { Text("Ketik angka atau karakter barcode") },
-                    isError = showError,
-                    supportingText = if (showError) {
-                        { Text("Kode barcode tidak boleh kosong", color = MaterialTheme.colorScheme.error) }
-                    } else null,
+                    isError = showError || duplicateError || isCodeDuplicate,
+                    supportingText = {
+                        when {
+                            showError -> Text("Kode barcode tidak boleh kosong", color = MaterialTheme.colorScheme.error)
+                            duplicateError || isCodeDuplicate -> Text("⚠️ Kode barcode ini sudah terdaftar di Excel! (Duplikat)", color = MaterialTheme.colorScheme.error)
+                            else -> null
+                        }
+                    },
                     singleLine = true,
                     modifier = Modifier
                         .fillMaxWidth()
@@ -151,11 +161,14 @@ fun ManualInputDialog(
         confirmButton = {
             Button(
                 onClick = {
-                    if (code.trim().isEmpty()) {
+                    val trimmed = code.trim()
+                    if (trimmed.isEmpty()) {
                         showError = true
+                    } else if (preventDuplicates && existingCodes.contains(trimmed)) {
+                        duplicateError = true
                     } else {
                         val qty = quantityText.toIntOrNull()?.coerceAtLeast(1) ?: 1
-                        onSubmit(code.trim(), title.trim(), qty, note.trim())
+                        onSubmit(trimmed, title.trim(), qty, note.trim())
                     }
                 },
                 modifier = Modifier.testTag("submit_manual_barcode")

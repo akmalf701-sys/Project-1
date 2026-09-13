@@ -47,6 +47,10 @@ import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.TableChart
 import androidx.compose.material.icons.filled.Vibration
+import androidx.compose.material.icons.filled.VolumeOff
+import androidx.compose.material.icons.filled.VolumeUp
+import androidx.compose.material.icons.filled.Shield
+import androidx.compose.material.icons.filled.WarningAmber
 import androidx.compose.material.icons.outlined.FlashOff
 import androidx.compose.material.icons.outlined.FlashOn
 import androidx.compose.material.icons.outlined.Vibration
@@ -119,6 +123,8 @@ fun BarcodeScannerApp(viewModel: BarcodeViewModel) {
 
     // Last scanned banner
     var recentScannedItem by remember { mutableStateOf<BarcodeEntity?>(null) }
+    // Duplicate rejection banner
+    var duplicateScannedCode by remember { mutableStateOf<String?>(null) }
 
     // Permission state
     var hasCameraPermission by remember {
@@ -157,10 +163,23 @@ fun BarcodeScannerApp(viewModel: BarcodeViewModel) {
     // Observe scan events to show interactive overlay card
     LaunchedEffect(Unit) {
         viewModel.scanEvent.collectLatest { item ->
+            duplicateScannedCode = null
             recentScannedItem = item
             delay(3500)
             if (recentScannedItem?.id == item.id) {
                 recentScannedItem = null
+            }
+        }
+    }
+
+    // Observe duplicate rejection events to show warning banner
+    LaunchedEffect(Unit) {
+        viewModel.duplicateEvent.collectLatest { code ->
+            recentScannedItem = null
+            duplicateScannedCode = code
+            delay(3500)
+            if (duplicateScannedCode == code) {
+                duplicateScannedCode = null
             }
         }
     }
@@ -171,6 +190,8 @@ fun BarcodeScannerApp(viewModel: BarcodeViewModel) {
     val isTorchOn by viewModel.isTorchOn.collectAsState()
     val useFrontCamera by viewModel.useFrontCamera.collectAsState()
     val hapticsEnabled by viewModel.hapticsEnabled.collectAsState()
+    val soundEnabled by viewModel.soundEnabled.collectAsState()
+    val preventDuplicates by viewModel.preventDuplicates.collectAsState()
 
     Scaffold(
         snackbarHost = { SnackbarHost(snackbarHostState) },
@@ -273,6 +294,10 @@ fun BarcodeScannerApp(viewModel: BarcodeViewModel) {
                         onToggleCameraFacing = { viewModel.toggleCameraFacing() },
                         hapticsEnabled = hapticsEnabled,
                         onToggleHaptics = { viewModel.toggleHaptics() },
+                        soundEnabled = soundEnabled,
+                        onToggleSound = { viewModel.toggleSound() },
+                        preventDuplicates = preventDuplicates,
+                        onTogglePreventDuplicates = { viewModel.togglePreventDuplicates() },
                         onPickPhoto = {
                             photoPickerLauncher.launch(
                                 PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
@@ -285,6 +310,8 @@ fun BarcodeScannerApp(viewModel: BarcodeViewModel) {
                         scannedCount = allItems.size,
                         onOpenExcelExport = { showExportSheet = true },
                         recentItem = recentScannedItem,
+                        duplicateCode = duplicateScannedCode,
+                        onDismissDuplicate = { duplicateScannedCode = null },
                         onEditRecentItem = { item ->
                             itemToEdit = item
                         }
@@ -298,6 +325,10 @@ fun BarcodeScannerApp(viewModel: BarcodeViewModel) {
                         totalItems = allItems,
                         searchQuery = searchQuery,
                         onSearchChange = { viewModel.setSearchQuery(it) },
+                        preventDuplicates = preventDuplicates,
+                        onTogglePreventDuplicates = { viewModel.togglePreventDuplicates() },
+                        soundEnabled = soundEnabled,
+                        onToggleSound = { viewModel.toggleSound() },
                         onEditItem = { item -> itemToEdit = item },
                         onDeleteItem = { item -> viewModel.deleteItem(item) },
                         onQuantityChange = { id, newQty -> viewModel.updateQuantity(id, newQty) },
@@ -320,13 +351,16 @@ fun BarcodeScannerApp(viewModel: BarcodeViewModel) {
     }
 
     if (showManualInputDialog) {
+        val existingCodes = remember(allItems) { allItems.map { it.code }.toSet() }
         ManualInputDialog(
             onDismiss = { showManualInputDialog = false },
             onSubmit = { code, title, qty, note ->
                 viewModel.addManualBarcode(code, "MANUAL", title, qty, note)
                 showManualInputDialog = false
                 Toast.makeText(context, "Barcode berhasil ditambahkan!", Toast.LENGTH_SHORT).show()
-            }
+            },
+            preventDuplicates = preventDuplicates,
+            existingCodes = existingCodes
         )
     }
 
@@ -384,12 +418,18 @@ fun ScannerTabContent(
     onToggleCameraFacing: () -> Unit,
     hapticsEnabled: Boolean,
     onToggleHaptics: () -> Unit,
+    soundEnabled: Boolean,
+    onToggleSound: () -> Unit,
+    preventDuplicates: Boolean,
+    onTogglePreventDuplicates: () -> Unit,
     onPickPhoto: () -> Unit,
     onManualInput: () -> Unit,
     onBarcodeDetected: (String, String) -> Unit,
     scannedCount: Int,
     onOpenExcelExport: () -> Unit,
     recentItem: BarcodeEntity?,
+    duplicateCode: String?,
+    onDismissDuplicate: () -> Unit,
     onEditRecentItem: (BarcodeEntity) -> Unit
 ) {
     Box(modifier = Modifier.fillMaxSize()) {
@@ -422,7 +462,7 @@ fun ScannerTabContent(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                    .padding(horizontal = 10.dp, vertical = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
@@ -430,7 +470,7 @@ fun ScannerTabContent(
                 IconButton(
                     onClick = onToggleTorch,
                     modifier = Modifier
-                        .size(40.dp)
+                        .size(38.dp)
                         .testTag("torch_toggle"),
                     colors = IconButtonDefaults.iconButtonColors(
                         containerColor = if (isTorchOn) Color(0xFFF59E0B) else Color(0x33FFFFFF),
@@ -439,14 +479,51 @@ fun ScannerTabContent(
                 ) {
                     Icon(
                         imageVector = if (isTorchOn) Icons.Outlined.FlashOn else Icons.Outlined.FlashOff,
-                        contentDescription = "Senter / Flash"
+                        contentDescription = "Senter / Flash",
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+
+                // Sound ("Tut" beep) toggle
+                IconButton(
+                    onClick = onToggleSound,
+                    modifier = Modifier
+                        .size(38.dp)
+                        .testTag("sound_toggle"),
+                    colors = IconButtonDefaults.iconButtonColors(
+                        containerColor = if (soundEnabled) Color(0xFF0284C7) else Color(0x33FFFFFF),
+                        contentColor = Color.White
+                    )
+                ) {
+                    Icon(
+                        imageVector = if (soundEnabled) Icons.Default.VolumeUp else Icons.Default.VolumeOff,
+                        contentDescription = if (soundEnabled) "Suara Tut Aktif" else "Suara Tut Mute",
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+
+                // Prevent Duplicates toggle
+                IconButton(
+                    onClick = onTogglePreventDuplicates,
+                    modifier = Modifier
+                        .size(38.dp)
+                        .testTag("prevent_duplicate_toggle"),
+                    colors = IconButtonDefaults.iconButtonColors(
+                        containerColor = if (preventDuplicates) Color(0xFF10B981) else Color(0x33FFFFFF),
+                        contentColor = Color.White
+                    )
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Shield,
+                        contentDescription = if (preventDuplicates) "Anti-Duplikat Aktif" else "Anti-Duplikat Nonaktif",
+                        modifier = Modifier.size(20.dp)
                     )
                 }
 
                 // Flip camera
                 IconButton(
                     onClick = onToggleCameraFacing,
-                    modifier = Modifier.size(40.dp),
+                    modifier = Modifier.size(38.dp),
                     colors = IconButtonDefaults.iconButtonColors(
                         containerColor = Color(0x33FFFFFF),
                         contentColor = Color.White
@@ -454,14 +531,15 @@ fun ScannerTabContent(
                 ) {
                     Icon(
                         imageVector = Icons.Default.FlipCameraAndroid,
-                        contentDescription = "Ganti Kamera"
+                        contentDescription = "Ganti Kamera",
+                        modifier = Modifier.size(20.dp)
                     )
                 }
 
                 // Scan from Gallery
                 IconButton(
                     onClick = onPickPhoto,
-                    modifier = Modifier.size(40.dp),
+                    modifier = Modifier.size(38.dp),
                     colors = IconButtonDefaults.iconButtonColors(
                         containerColor = Color(0x33FFFFFF),
                         contentColor = Color.White
@@ -469,14 +547,15 @@ fun ScannerTabContent(
                 ) {
                     Icon(
                         imageVector = Icons.Default.Image,
-                        contentDescription = "Scan dari Galeri Foto"
+                        contentDescription = "Scan dari Galeri Foto",
+                        modifier = Modifier.size(20.dp)
                     )
                 }
 
                 // Manual Input
                 IconButton(
                     onClick = onManualInput,
-                    modifier = Modifier.size(40.dp),
+                    modifier = Modifier.size(38.dp),
                     colors = IconButtonDefaults.iconButtonColors(
                         containerColor = Color(0x33FFFFFF),
                         contentColor = Color.White
@@ -484,7 +563,8 @@ fun ScannerTabContent(
                 ) {
                     Icon(
                         imageVector = Icons.Default.Keyboard,
-                        contentDescription = "Input Manual"
+                        contentDescription = "Input Manual",
+                        modifier = Modifier.size(20.dp)
                     )
                 }
 
@@ -498,18 +578,18 @@ fun ScannerTabContent(
                         .testTag("top_excel_export_button")
                 ) {
                     Row(
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Icon(
                             imageVector = Icons.Default.TableChart,
                             contentDescription = "Excel",
                             tint = Color.White,
-                            modifier = Modifier.size(16.dp)
+                            modifier = Modifier.size(15.dp)
                         )
                         Spacer(modifier = Modifier.width(4.dp))
                         Text(
-                            text = "Excel ($scannedCount)",
+                            text = "$scannedCount",
                             color = Color.White,
                             fontWeight = FontWeight.Bold,
                             fontSize = 12.sp
@@ -519,24 +599,171 @@ fun ScannerTabContent(
             }
         }
 
+        // Active Mode Status Indicators (Anti-Duplikat & Suara Tut Pills)
+        Row(
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .statusBarsPadding()
+                .padding(top = 66.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Surface(
+                shape = RoundedCornerShape(12.dp),
+                color = if (preventDuplicates) Color(0xE0065F46) else Color(0xCC7F1D1D),
+                modifier = Modifier
+                    .clip(RoundedCornerShape(12.dp))
+                    .clickable { onTogglePreventDuplicates() }
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Shield,
+                        contentDescription = null,
+                        tint = Color.White,
+                        modifier = Modifier.size(12.dp)
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(
+                        text = if (preventDuplicates) "🛡️ Anti-Duplikat ON" else "⚠️ Duplikat Diizinkan",
+                        color = Color.White,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+            }
+
+            Surface(
+                shape = RoundedCornerShape(12.dp),
+                color = if (soundEnabled) Color(0xE00369A1) else Color(0xCC475569),
+                modifier = Modifier
+                    .clip(RoundedCornerShape(12.dp))
+                    .clickable { onToggleSound() }
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = if (soundEnabled) Icons.Default.VolumeUp else Icons.Default.VolumeOff,
+                        contentDescription = null,
+                        tint = Color.White,
+                        modifier = Modifier.size(12.dp)
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(
+                        text = if (soundEnabled) "🔊 Suara Tut ON" else "🔇 Tut Mute",
+                        color = Color.White,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+            }
+        }
+
         // Subtitle Tip Overlay
         Text(
-            text = "Arahkan kamera tepat ke kode barcode",
+            text = "Arahkan kamera tepat ke barcode",
             color = Color.White.copy(alpha = 0.85f),
-            fontSize = 13.sp,
+            fontSize = 12.sp,
             fontWeight = FontWeight.Medium,
             textAlign = TextAlign.Center,
             modifier = Modifier
                 .align(Alignment.TopCenter)
                 .statusBarsPadding()
-                .padding(top = 74.dp)
-                .background(Color(0x66000000), RoundedCornerShape(16.dp))
-                .padding(horizontal = 16.dp, vertical = 6.dp)
+                .padding(top = 98.dp)
+                .background(Color(0x66000000), RoundedCornerShape(14.dp))
+                .padding(horizontal = 14.dp, vertical = 4.dp)
         )
+
+        // Duplicate Barcode Warning Pop-up Banner
+        AnimatedVisibility(
+            visible = duplicateCode != null,
+            enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),
+            exit = slideOutVertically(targetOffsetY = { it }) + fadeOut(),
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .padding(horizontal = 16.dp, vertical = 16.dp)
+        ) {
+            duplicateCode?.let { code ->
+                Card(
+                    shape = RoundedCornerShape(16.dp),
+                    colors = CardDefaults.cardColors(containerColor = Color(0xF0450A0A)),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 8.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onDismissDuplicate() }
+                        .testTag("duplicate_rejection_card")
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(14.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Surface(
+                            shape = CircleShape,
+                            color = Color(0xFFEF4444),
+                            modifier = Modifier.size(38.dp)
+                        ) {
+                            Box(contentAlignment = Alignment.Center) {
+                                Icon(
+                                    imageVector = Icons.Default.WarningAmber,
+                                    contentDescription = null,
+                                    tint = Color.White,
+                                    modifier = Modifier.size(22.dp)
+                                )
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.width(12.dp))
+
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "⚠️ Barcode Duplikat Ditolak!",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = Color(0xFFFCA5A5),
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                text = code,
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontFamily = FontFamily.Monospace,
+                                color = Color.White,
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Text(
+                                text = "Nomor ini sudah ada di daftar Excel.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = Color.White.copy(alpha = 0.85f),
+                                fontSize = 11.sp
+                            )
+                        }
+
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = Color(0x33FFFFFF)
+                        ) {
+                            Text(
+                                text = "Abaikan",
+                                color = Color.White,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                            )
+                        }
+                    }
+                }
+            }
+        }
 
         // Recent Scanned Item Pop-up Banner
         AnimatedVisibility(
-            visible = recentItem != null,
+            visible = recentItem != null && duplicateCode == null,
             enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),
             exit = slideOutVertically(targetOffsetY = { it }) + fadeOut(),
             modifier = Modifier
@@ -578,7 +805,7 @@ fun ScannerTabContent(
                         Column(modifier = Modifier.weight(1f)) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Text(
-                                    text = "Berhasil Terscan!",
+                                    text = "Berhasil Terscan! • Tut",
                                     style = MaterialTheme.typography.labelMedium,
                                     color = Color(0xFF10B981),
                                     fontWeight = FontWeight.Bold
@@ -700,6 +927,10 @@ fun DataListTabContent(
     totalItems: List<BarcodeEntity>,
     searchQuery: String,
     onSearchChange: (String) -> Unit,
+    preventDuplicates: Boolean,
+    onTogglePreventDuplicates: () -> Unit,
+    soundEnabled: Boolean,
+    onToggleSound: () -> Unit,
     onEditItem: (BarcodeEntity) -> Unit,
     onDeleteItem: (BarcodeEntity) -> Unit,
     onQuantityChange: (Long, Int) -> Unit,
@@ -759,6 +990,68 @@ fun DataListTabContent(
                         imageVector = Icons.Default.Add,
                         contentDescription = "Tambah Manual",
                         tint = MaterialTheme.colorScheme.primary
+                    )
+                }
+            }
+        }
+
+        // Mode Settings Pills (Anti-Duplikat & Suara Tut)
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 2.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Surface(
+                shape = RoundedCornerShape(8.dp),
+                color = if (preventDuplicates) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.errorContainer,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(8.dp))
+                    .clickable { onTogglePreventDuplicates() }
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Shield,
+                        contentDescription = null,
+                        tint = if (preventDuplicates) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onErrorContainer,
+                        modifier = Modifier.size(13.dp)
+                    )
+                    Spacer(modifier = Modifier.width(5.dp))
+                    Text(
+                        text = if (preventDuplicates) "Anti-Duplikat: AKTIF" else "Anti-Duplikat: NONAKTIF",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = if (preventDuplicates) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onErrorContainer
+                    )
+                }
+            }
+
+            Surface(
+                shape = RoundedCornerShape(8.dp),
+                color = if (soundEnabled) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surfaceVariant,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(8.dp))
+                    .clickable { onToggleSound() }
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = if (soundEnabled) Icons.Default.VolumeUp else Icons.Default.VolumeOff,
+                        contentDescription = null,
+                        tint = if (soundEnabled) MaterialTheme.colorScheme.onSecondaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(13.dp)
+                    )
+                    Spacer(modifier = Modifier.width(5.dp))
+                    Text(
+                        text = if (soundEnabled) "Suara Tut: ON" else "Suara Tut: MUTE",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = if (soundEnabled) MaterialTheme.colorScheme.onSecondaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
             }
