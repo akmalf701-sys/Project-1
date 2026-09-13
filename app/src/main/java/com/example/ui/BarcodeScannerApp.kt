@@ -189,6 +189,7 @@ fun BarcodeScannerApp(viewModel: BarcodeViewModel) {
     val searchQuery by viewModel.searchQuery.collectAsState()
     val isTorchOn by viewModel.isTorchOn.collectAsState()
     val useFrontCamera by viewModel.useFrontCamera.collectAsState()
+    val isContinuousMode by viewModel.isContinuousMode.collectAsState()
     val hapticsEnabled by viewModel.hapticsEnabled.collectAsState()
     val soundEnabled by viewModel.soundEnabled.collectAsState()
     val preventDuplicates by viewModel.preventDuplicates.collectAsState()
@@ -298,6 +299,8 @@ fun BarcodeScannerApp(viewModel: BarcodeViewModel) {
                         onToggleSound = { viewModel.toggleSound() },
                         preventDuplicates = preventDuplicates,
                         onTogglePreventDuplicates = { viewModel.togglePreventDuplicates() },
+                        autoScanEnabled = isContinuousMode,
+                        onToggleAutoScan = { viewModel.toggleContinuousMode() },
                         onPickPhoto = {
                             photoPickerLauncher.launch(
                                 PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
@@ -422,6 +425,8 @@ fun ScannerTabContent(
     onToggleSound: () -> Unit,
     preventDuplicates: Boolean,
     onTogglePreventDuplicates: () -> Unit,
+    autoScanEnabled: Boolean = true,
+    onToggleAutoScan: () -> Unit = {},
     onPickPhoto: () -> Unit,
     onManualInput: () -> Unit,
     onBarcodeDetected: (String, String) -> Unit,
@@ -434,11 +439,13 @@ fun ScannerTabContent(
 ) {
     Box(modifier = Modifier.fillMaxSize()) {
         if (hasCameraPermission) {
-            // Live CameraX Viewfinder
+            // Live CameraX Viewfinder with Shutter Freeze Button & Stability Filter
             CameraScannerView(
                 modifier = Modifier.fillMaxSize(),
                 isTorchOn = isTorchOn,
                 useFrontCamera = useFrontCamera,
+                autoScanEnabled = autoScanEnabled,
+                onToggleAutoScan = onToggleAutoScan,
                 onBarcodeDetected = onBarcodeDetected
             )
         } else {
@@ -685,7 +692,7 @@ fun ScannerTabContent(
             exit = slideOutVertically(targetOffsetY = { it }) + fadeOut(),
             modifier = Modifier
                 .align(Alignment.BottomCenter)
-                .padding(horizontal = 16.dp, vertical = 16.dp)
+                .padding(start = 16.dp, end = 16.dp, bottom = 148.dp)
         ) {
             duplicateCode?.let { code ->
                 Card(
@@ -768,7 +775,7 @@ fun ScannerTabContent(
             exit = slideOutVertically(targetOffsetY = { it }) + fadeOut(),
             modifier = Modifier
                 .align(Alignment.BottomCenter)
-                .padding(horizontal = 16.dp, vertical = 16.dp)
+                .padding(start = 16.dp, end = 16.dp, bottom = 148.dp)
         ) {
             recentItem?.let { item ->
                 Card(

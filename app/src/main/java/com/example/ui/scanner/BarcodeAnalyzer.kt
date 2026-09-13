@@ -28,12 +28,31 @@ class BarcodeAnalyzer(
     @Volatile
     private var lastAnalyzedTimestamp = 0L
 
+    @Volatile
+    var isPaused: Boolean = false
+
+    @Volatile
+    var autoScanEnabled: Boolean = true
+
+    // Stability filter: requires identical reading across consecutive frames for 1D barcodes
+    // to completely eliminate motion blur partial misreads while products are moving
+    private var candidateCode: String = ""
+    private var candidateFormat: String = ""
+    private var candidateCount: Int = 0
+    private var candidateFirstSeenTime: Long = 0L
+
     @OptIn(ExperimentalGetImage::class)
     override fun analyze(imageProxy: ImageProxy) {
         val now = System.currentTimeMillis()
 
-        // Throttle frame analysis to prevent CPU overload and SELinux audit rate limiting
-        if (isAnalyzing || (now - lastAnalyzedTimestamp < 200L)) {
+        // Check if paused or live scan is disabled (manual photo button mode)
+        if (isPaused || !autoScanEnabled) {
+            imageProxy.close()
+            return
+        }
+
+        // Throttle frame analysis to prevent CPU overload and SELinux audit rate limiting (4 FPS is optimal)
+        if (isAnalyzing || (now - lastAnalyzedTimestamp < 250L)) {
             imageProxy.close()
             return
         }
@@ -42,24 +61,67 @@ class BarcodeAnalyzer(
         if (mediaImage != null) {
             isAnalyzing = true
             lastAnalyzedTimestamp = now
-            val image = InputImage.fromMediaImage(mediaImage, imageProxy.imageInfo.rotationDegrees)
-            scanner.process(image)
-                .addOnSuccessListener { barcodes ->
-                    for (barcode in barcodes) {
-                        val rawValue = barcode.rawValue
-                        if (!rawValue.isNullOrBlank()) {
-                            val formatStr = getFormatName(barcode.format)
-                            onBarcodeDetected(rawValue, formatStr)
+            try {
+                val image = InputImage.fromMediaImage(mediaImage, imageProxy.imageInfo.rotationDegrees)
+                scanner.process(image)
+                    .addOnSuccessListener { barcodes ->
+                        if (barcodes.isEmpty()) {
+                            if (now - candidateFirstSeenTime > 1200L) {
+                                candidateCode = ""
+                                candidateCount = 0
+                            }
+                        } else {
+                            for (barcode in barcodes) {
+                                val rawValue = barcode.rawValue
+                                if (!rawValue.isNullOrBlank()) {
+                                    val trimmed = rawValue.trim()
+                                    val formatStr = getFormatName(barcode.format)
+
+                                    val isLinear1D = when (barcode.format) {
+                                        Barcode.FORMAT_EAN_13, Barcode.FORMAT_EAN_8,
+                                        Barcode.FORMAT_UPC_A, Barcode.FORMAT_UPC_E,
+                                        Barcode.FORMAT_CODE_128, Barcode.FORMAT_CODE_39,
+                                        Barcode.FORMAT_CODE_93, Barcode.FORMAT_CODABAR,
+                                        Barcode.FORMAT_ITF -> true
+                                        else -> false
+                                    }
+
+                                    if (!isLinear1D) {
+                                        // 2D QR / DataMatrix has built-in ECC checksums
+                                        onBarcodeDetected(trimmed, formatStr)
+                                    } else {
+                                        // 1D Barcode: Require 2 consecutive matching reads within 1200ms
+                                        // to verify the image is stable and prevent motion blur corruptions
+                                        val isSameCandidate = (trimmed == candidateCode) && (now - candidateFirstSeenTime < 1200L)
+                                        if (isSameCandidate) {
+                                            candidateCount++
+                                            if (candidateCount >= 2) {
+                                                onBarcodeDetected(trimmed, formatStr)
+                                                candidateCode = ""
+                                                candidateCount = 0
+                                            }
+                                        } else {
+                                            candidateCode = trimmed
+                                            candidateFormat = formatStr
+                                            candidateCount = 1
+                                            candidateFirstSeenTime = now
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
-                }
-                .addOnFailureListener {
-                    // Ignore transient frame errors
-                }
-                .addOnCompleteListener {
-                    isAnalyzing = false
-                    imageProxy.close()
-                }
+                    .addOnFailureListener {
+                        // Ignore transient frame errors
+                    }
+                    .addOnCompleteListener {
+                        isAnalyzing = false
+                        imageProxy.close()
+                    }
+            } catch (e: Exception) {
+                isAnalyzing = false
+                imageProxy.close()
+            }
         } else {
             imageProxy.close()
         }

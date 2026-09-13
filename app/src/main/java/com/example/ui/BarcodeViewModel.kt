@@ -74,6 +74,10 @@ class BarcodeViewModel(
     private val _isContinuousMode = MutableStateFlow(true)
     val isContinuousMode = _isContinuousMode.asStateFlow()
 
+    fun setContinuousMode(enabled: Boolean) {
+        _isContinuousMode.value = enabled
+    }
+
     private val _hapticsEnabled = MutableStateFlow(true)
     val hapticsEnabled = _hapticsEnabled.asStateFlow()
 
