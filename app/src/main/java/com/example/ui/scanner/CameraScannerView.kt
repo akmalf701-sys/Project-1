@@ -96,17 +96,24 @@ fun CameraScannerView(
                 cameraProvider = provider
                 provider.unbindAll()
 
-                val preview = Preview.Builder().build().also {
-                    it.surfaceProvider = previewView.surfaceProvider
-                }
+                @Suppress("DEPRECATION")
+                val preview = Preview.Builder()
+                    .setTargetResolution(android.util.Size(1280, 720))
+                    .build()
+                    .also {
+                        it.surfaceProvider = previewView.surfaceProvider
+                    }
 
                 val analyzer = BarcodeAnalyzer { code, format ->
                     onBarcodeDetected(code, format)
                 }
                 currentAnalyzer = analyzer
 
+                @Suppress("DEPRECATION")
                 val imageAnalysis = ImageAnalysis.Builder()
+                    .setTargetResolution(android.util.Size(1280, 720))
                     .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                    .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
                     .build()
                     .also {
                         it.setAnalyzer(cameraExecutor, analyzer)

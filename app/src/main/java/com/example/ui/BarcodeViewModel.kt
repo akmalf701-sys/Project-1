@@ -240,17 +240,22 @@ class BarcodeViewModel(
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 val vibratorManager = appContext.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? VibratorManager
-                vibratorManager?.defaultVibrator?.vibrate(
-                    VibrationEffect.createOneShot(70, VibrationEffect.DEFAULT_AMPLITUDE)
-                )
+                val defaultVibrator = vibratorManager?.defaultVibrator
+                if (defaultVibrator?.hasVibrator() == true) {
+                    defaultVibrator.vibrate(
+                        VibrationEffect.createOneShot(70, VibrationEffect.DEFAULT_AMPLITUDE)
+                    )
+                }
             } else {
                 @Suppress("DEPRECATION")
                 val vibrator = appContext.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    vibrator?.vibrate(VibrationEffect.createOneShot(70, VibrationEffect.DEFAULT_AMPLITUDE))
-                } else {
-                    @Suppress("DEPRECATION")
-                    vibrator?.vibrate(70)
+                if (vibrator?.hasVibrator() == true) {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        vibrator.vibrate(VibrationEffect.createOneShot(70, VibrationEffect.DEFAULT_AMPLITUDE))
+                    } else {
+                        @Suppress("DEPRECATION")
+                        vibrator.vibrate(70)
+                    }
                 }
             }
         } catch (_: Exception) {
