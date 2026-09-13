@@ -1,0 +1,6 @@
+{
+  "name": "Barcode to Excel",
+  "description": "Aplikasi khusus scan barcode dengan ekspor praktis ke Microsoft Excel dan spreadsheet",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
