@@ -9,31 +9,28 @@ import com.google.mlkit.vision.barcode.BarcodeScannerOptions
 import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.common.InputImage
-import com.google.mlkit.vision.text.TextRecognition
-import com.google.mlkit.vision.text.latin.TextRecognizerOptions
-
-enum class ScannerMode {
-    BARCODE,        // Scan Barcode Garis 1D & QR Code
-    OCR_CONTRACT    // Scan Teks / OCR Nomor Kontrak (misal CCTSMG26020583)
-}
 
 class BarcodeAnalyzer(
-    private val onBarcodeDetected: (code: String, format: String) -> Unit,
-    private val onOcrTextCandidates: ((List<String>) -> Unit)? = null
+    private val onBarcodeDetected: (code: String, format: String) -> Unit
 ) : ImageAnalysis.Analyzer {
 
-    // Configure scanner for all supported 1D and 2D barcode formats
+    // Configure scanner strictly for standard product and contract 1D/2D barcodes
+    // Exclude CODABAR and CODE_93 which easily misread printed text as barcodes
     private val barcodeScanner = BarcodeScanning.getClient(
         BarcodeScannerOptions.Builder()
-            .setBarcodeFormats(Barcode.FORMAT_ALL_FORMATS)
+            .setBarcodeFormats(
+                Barcode.FORMAT_CODE_128,
+                Barcode.FORMAT_CODE_39,
+                Barcode.FORMAT_EAN_13,
+                Barcode.FORMAT_EAN_8,
+                Barcode.FORMAT_UPC_A,
+                Barcode.FORMAT_UPC_E,
+                Barcode.FORMAT_QR_CODE,
+                Barcode.FORMAT_DATA_MATRIX,
+                Barcode.FORMAT_ITF
+            )
             .build()
     )
-
-    // ML Kit Text Recognition for OCR Contract Number
-    private val textRecognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
-
-    @Volatile
-    var scannerMode: ScannerMode = ScannerMode.BARCODE
 
     @Volatile
     private var isAnalyzing = false
@@ -51,7 +48,7 @@ class BarcodeAnalyzer(
     private var lastDetectedCode: String = ""
     private var lastDetectedTimestamp: Long = 0L
 
-    // Stability candidate for 1D barcodes
+    // Stability candidate for 1D barcodes (Must match on consecutive frames)
     private var candidateCode: String = ""
     private var candidateCount: Int = 0
     private var candidateFirstSeenTime: Long = 0L
@@ -66,8 +63,8 @@ class BarcodeAnalyzer(
             return
         }
 
-        // Throttle frame analysis (~5 FPS) for responsive scanning with zero lag
-        if (isAnalyzing || (now - lastAnalyzedTimestamp < 200L)) {
+        // Throttle frame analysis (~6 FPS) for smooth performance and accurate reading
+        if (isAnalyzing || (now - lastAnalyzedTimestamp < 160L)) {
             imageProxy.close()
             return
         }
@@ -78,12 +75,7 @@ class BarcodeAnalyzer(
             lastAnalyzedTimestamp = now
             try {
                 val image = InputImage.fromMediaImage(mediaImage, imageProxy.imageInfo.rotationDegrees)
-                
-                if (scannerMode == ScannerMode.BARCODE) {
-                    analyzeBarcode(image, imageProxy, now)
-                } else {
-                    analyzeOcrText(image, imageProxy, now)
-                }
+                analyzeBarcode(image, imageProxy, now)
             } catch (e: Exception) {
                 Log.e("BarcodeAnalyzer", "Analysis error", e)
                 isAnalyzing = false
@@ -97,28 +89,54 @@ class BarcodeAnalyzer(
     private fun analyzeBarcode(image: InputImage, imageProxy: ImageProxy, now: Long) {
         barcodeScanner.process(image)
             .addOnSuccessListener { barcodes ->
-                val validBarcode = barcodes.firstOrNull { !it.rawValue.isNullOrBlank() }
+                val imgW = image.width.toFloat()
+                val imgH = image.height.toFloat()
+
+                // Find first valid barcode that passes all filters:
+                // 1. Content check (No spaces or text artifacts)
+                // 2. Viewfinder ROI (Must be centered inside the viewfinder box)
+                val validBarcode = barcodes.firstOrNull { barcode ->
+                    val raw = barcode.rawValue
+                    if (raw.isNullOrBlank()) return@firstOrNull false
+
+                    // Reject any 1D barcode containing spaces or invalid characters
+                    if (!isValidBarcode(raw, barcode.format)) {
+                        return@firstOrNull false
+                    }
+
+                    // Region of interest: Barcode must be centered within the viewfinder box
+                    val box = barcode.boundingBox
+                    if (box != null && imgW > 0 && imgH > 0) {
+                        val cx = box.centerX().toFloat()
+                        val cy = box.centerY().toFloat()
+
+                        val inCenterW = cx >= (imgW * 0.12f) && cx <= (imgW * 0.88f)
+                        val inCenterH = cy >= (imgH * 0.18f) && cy <= (imgH * 0.82f)
+
+                        if (!inCenterW || !inCenterH) {
+                            return@firstOrNull false
+                        }
+                    }
+
+                    true
+                }
+
                 if (validBarcode != null) {
                     val raw = validBarcode.rawValue!!.trim()
-                    // Strip asterisks for Code 39 (e.g. *4642605902* -> 4642605902)
                     val code = cleanBarcodeValue(raw, validBarcode.format)
                     val formatStr = getFormatName(validBarcode.format)
 
-                    val isLinear1D = when (validBarcode.format) {
-                        Barcode.FORMAT_EAN_13, Barcode.FORMAT_EAN_8,
-                        Barcode.FORMAT_UPC_A, Barcode.FORMAT_UPC_E,
-                        Barcode.FORMAT_CODE_128, Barcode.FORMAT_CODE_39,
-                        Barcode.FORMAT_CODE_93, Barcode.FORMAT_CODABAR,
-                        Barcode.FORMAT_ITF -> true
-                        else -> false
-                    }
+                    val is2D = (validBarcode.format == Barcode.FORMAT_QR_CODE || 
+                                validBarcode.format == Barcode.FORMAT_DATA_MATRIX)
 
-                    if (!isLinear1D) {
-                        // 2D QR / DataMatrix has built-in ECC checksums
+                    if (is2D) {
+                        // 2D codes have built-in error correction / checksums
                         triggerIfAllowed(code, formatStr, now)
                     } else {
-                        // 1D Barcode: check stability
-                        val isSameCandidate = (code == candidateCode) && (now - candidateFirstSeenTime < 1000L)
+                        // 1D Barcode: Enforce strict multi-frame stability!
+                        // Transient text misreads (like "W .605Y02") change every frame and never repeat.
+                        // Real barcodes match identically across frames.
+                        val isSameCandidate = (code == candidateCode) && (now - candidateFirstSeenTime < 800L)
                         if (isSameCandidate) {
                             candidateCount++
                             if (candidateCount >= 2) {
@@ -130,59 +148,13 @@ class BarcodeAnalyzer(
                             candidateCode = code
                             candidateCount = 1
                             candidateFirstSeenTime = now
-                            // If code has good length (e.g. >= 8 chars like in contract barcodes), also allow fast single-frame match if cooldown passed
-                            if (code.length >= 8 && (code != lastDetectedCode || now - lastDetectedTimestamp > 2500L)) {
-                                triggerIfAllowed(code, formatStr, now)
-                                candidateCode = ""
-                                candidateCount = 0
-                            }
                         }
                     }
                 } else {
-                    if (now - candidateFirstSeenTime > 800L) {
+                    if (now - candidateFirstSeenTime > 600L) {
                         candidateCode = ""
                         candidateCount = 0
                     }
-                }
-            }
-            .addOnCompleteListener {
-                isAnalyzing = false
-                imageProxy.close()
-            }
-    }
-
-    private fun analyzeOcrText(image: InputImage, imageProxy: ImageProxy, now: Long) {
-        textRecognizer.process(image)
-            .addOnSuccessListener { visionText ->
-                val candidateList = mutableListOf<String>()
-                for (block in visionText.textBlocks) {
-                    for (line in block.lines) {
-                        val text = line.text.trim()
-                        // Look for contract number candidates (e.g. CCTSMG26020583, U06326001, 4642605902)
-                        // Ignore short noise words (< 4 chars)
-                        val words = text.split("\\s+".toRegex())
-                        for (w in words) {
-                            val cleanWord = w.replace("[^A-Za-z0-9]".toRegex(), "")
-                            if (cleanWord.length >= 6) {
-                                candidateList.add(cleanWord)
-                            }
-                        }
-                    }
-                }
-
-                val distinctCandidates = candidateList.distinct()
-                onOcrTextCandidates?.invoke(distinctCandidates)
-
-                // If candidate looks strongly like contract number (e.g. starts with letters followed by digits like CCTSMG26020583)
-                val contractCandidate = distinctCandidates.firstOrNull { candidate ->
-                    // Matches alphanumeric contract format like CCTSMG26020583
-                    val hasLetter = candidate.any { it.isLetter() }
-                    val hasDigit = candidate.any { it.isDigit() }
-                    hasLetter && hasDigit && candidate.length in 8..24
-                } ?: distinctCandidates.firstOrNull { it.length in 8..24 }
-
-                if (contractCandidate != null) {
-                    triggerIfAllowed(contractCandidate, "NOMOR_KONTRAK", now)
                 }
             }
             .addOnCompleteListener {
@@ -206,16 +178,38 @@ class BarcodeAnalyzer(
         try {
             barcodeScanner.close()
         } catch (_: Exception) {}
-        try {
-            textRecognizer.close()
-        } catch (_: Exception) {}
     }
 
     companion object {
+        /**
+         * Validates barcode content to reject text misreads.
+         * Real barcodes (Code 39, Code 128, etc.) do NOT have random spaces or isolated periods.
+         */
+        fun isValidBarcode(raw: String, format: Int): Boolean {
+            val trimmed = raw.trim()
+            if (trimmed.length < 3) return false
+
+            // Reject any 1D barcode containing whitespace - this is the #1 cause of text misreads
+            if (trimmed.contains(" ") || trimmed.contains("\t") || trimmed.contains("\n")) {
+                return false
+            }
+
+            if (format == Barcode.FORMAT_CODE_39) {
+                val cleaned = cleanBarcodeValue(trimmed, format)
+                if (cleaned.length < 3) return false
+                // Reject isolated dots or periods common in false text readings
+                if (cleaned.startsWith(".") || cleaned.endsWith(".") || cleaned.contains("..")) {
+                    return false
+                }
+            }
+
+            return true
+        }
+
         fun cleanBarcodeValue(raw: String, format: Int): String {
             val trimmed = raw.trim()
             return if (format == Barcode.FORMAT_CODE_39) {
-                // Code 39 often embeds start/stop asterisks like *4642605902*
+                // Code 39 uses * as start/stop delimiters (e.g. *4642605902* -> 4642605902)
                 trimmed.removePrefix("*").removeSuffix("*").trim()
             } else {
                 trimmed

@@ -147,18 +147,13 @@ fun CameraScannerView(
     var freezeFailedMessage by remember { mutableStateOf<String?>(null) }
     var freezeOcrCandidates by remember { mutableStateOf<List<String>>(emptyList()) }
 
-    // Scanner Mode (Barcode Garis vs Scan Teks Nomor Kontrak OCR)
-    var scannerMode by remember { mutableStateOf(ScannerMode.BARCODE) }
     var zoomRatio by remember { mutableFloatStateOf(1.0f) }
     var tapFocusPoint by remember { mutableStateOf<Offset?>(null) }
     val coroutineScope = rememberCoroutineScope()
 
-    // Synchronize autoScanEnabled and scannerMode with analyzer
+    // Synchronize autoScanEnabled with analyzer
     LaunchedEffect(autoScanEnabled, currentAnalyzer) {
         currentAnalyzer?.autoScanEnabled = autoScanEnabled
-    }
-    LaunchedEffect(scannerMode, currentAnalyzer) {
-        currentAnalyzer?.scannerMode = scannerMode
     }
 
     // Toggle torch when state changes
@@ -181,67 +176,69 @@ fun CameraScannerView(
 
         val inputImage = InputImage.fromBitmap(bmp, 0)
         val options = BarcodeScannerOptions.Builder()
-            .setBarcodeFormats(Barcode.FORMAT_ALL_FORMATS)
+            .setBarcodeFormats(
+                Barcode.FORMAT_CODE_128,
+                Barcode.FORMAT_CODE_39,
+                Barcode.FORMAT_EAN_13,
+                Barcode.FORMAT_EAN_8,
+                Barcode.FORMAT_UPC_A,
+                Barcode.FORMAT_UPC_E,
+                Barcode.FORMAT_QR_CODE,
+                Barcode.FORMAT_DATA_MATRIX,
+                Barcode.FORMAT_ITF
+            )
             .build()
         val stillScanner = BarcodeScanning.getClient(options)
         val textRecognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
 
         stillScanner.process(inputImage)
             .addOnSuccessListener { barcodes ->
-                val validBarcode = barcodes.firstOrNull { !it.rawValue.isNullOrBlank() }
+                val validBarcode = barcodes.firstOrNull {
+                    !it.rawValue.isNullOrBlank() && BarcodeAnalyzer.isValidBarcode(it.rawValue!!, it.format)
+                }
+
                 if (validBarcode != null) {
                     val raw = validBarcode.rawValue!!.trim()
                     val code = BarcodeAnalyzer.cleanBarcodeValue(raw, validBarcode.format)
                     val format = BarcodeAnalyzer.getFormatName(validBarcode.format)
                     freezeResultCode = code
                     onBarcodeDetected(code, format)
-                }
-
-                // Also run OCR text recognition to read contract numbers (e.g. CCTSMG26020583)
-                textRecognizer.process(inputImage)
-                    .addOnSuccessListener { visionText ->
-                        val candidates = mutableListOf<String>()
-                        for (block in visionText.textBlocks) {
-                            for (line in block.lines) {
-                                val words = line.text.trim().split("\\s+".toRegex())
-                                for (w in words) {
-                                    val clean = w.replace("[^A-Za-z0-9]".toRegex(), "")
-                                    if (clean.length >= 6) {
-                                        candidates.add(clean)
+                    isProcessingFreeze = false
+                } else {
+                    // Barcode not detected, check if OCR can find a contract number candidate to suggest
+                    textRecognizer.process(inputImage)
+                        .addOnSuccessListener { visionText ->
+                            val candidates = mutableListOf<String>()
+                            for (block in visionText.textBlocks) {
+                                for (line in block.lines) {
+                                    val words = line.text.trim().split("\\s+".toRegex())
+                                    for (w in words) {
+                                        val clean = w.replace("[^A-Za-z0-9]".toRegex(), "")
+                                        if (clean.length >= 6) {
+                                            candidates.add(clean)
+                                        }
                                     }
                                 }
                             }
-                        }
-                        val distinct = candidates.distinct()
-                        freezeOcrCandidates = distinct
-
-                        if (scannerMode == ScannerMode.OCR_CONTRACT || freezeResultCode == null) {
-                            val contractCandidate = distinct.firstOrNull { c ->
-                                c.any { it.isLetter() } && c.any { it.isDigit() } && c.length in 8..24
-                            } ?: distinct.firstOrNull { it.length in 8..24 }
-
-                            if (contractCandidate != null) {
-                                freezeResultCode = contractCandidate
-                                onBarcodeDetected(contractCandidate, "NOMOR_KONTRAK")
-                            } else if (freezeResultCode == null) {
-                                freezeFailedMessage = "Barcode atau Nomor Kontrak belum terdeteksi jelas. Coba atur Zoom 1.5x / 2x lalu bidik lagi."
+                            val distinct = candidates.distinct().filter { c ->
+                                c.length in 8..24 && (c.any { it.isDigit() })
                             }
+                            freezeOcrCandidates = distinct
+                            freezeFailedMessage = "Garis barcode belum terdeteksi jelas. Pastikan barcode berada di dalam kotak tengah dan gunakan tombol Zoom 1.5x / 2x."
+                            isProcessingFreeze = false
                         }
-                        isProcessingFreeze = false
-                    }
-                    .addOnFailureListener {
-                        isProcessingFreeze = false
-                        if (freezeResultCode == null) {
-                            freezeFailedMessage = "Barcode tidak terdeteksi. Gunakan tombol Zoom atau bidik lebih dekat."
+                        .addOnFailureListener {
+                            freezeFailedMessage = "Garis barcode belum terdeteksi jelas. Pastikan barcode berada di dalam kotak tengah."
+                            isProcessingFreeze = false
                         }
-                    }
-                    .addOnCompleteListener {
-                        try { textRecognizer.close() } catch (_: Exception) {}
-                    }
+                        .addOnCompleteListener {
+                            try { textRecognizer.close() } catch (_: Exception) {}
+                        }
+                }
             }
             .addOnFailureListener {
                 isProcessingFreeze = false
-                freezeFailedMessage = "Gagal memproses gambar bidikan."
+                freezeFailedMessage = "Gagal memproses gambar. Silakan bidik ulang."
             }
             .addOnCompleteListener {
                 try { stillScanner.close() } catch (_: Exception) {}
@@ -328,7 +325,6 @@ fun CameraScannerView(
                     }
                 ).apply {
                     this.autoScanEnabled = autoScanEnabled
-                    this.scannerMode = scannerMode
                 }
                 currentAnalyzer = analyzer
 
@@ -446,7 +442,7 @@ fun CameraScannerView(
             )
         }
 
-        // 4. Scanner Mode Switcher (Barcode vs OCR Teks No. Kontrak)
+        // 4. Focus Guidance Banner at Top
         AnimatedVisibility(
             visible = frozenBitmap == null,
             modifier = Modifier
@@ -459,70 +455,22 @@ fun CameraScannerView(
                 border = BorderStroke(1.dp, Color(0x33FFFFFF))
             ) {
                 Row(
-                    modifier = Modifier.padding(4.dp),
-                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Surface(
-                        shape = RoundedCornerShape(16.dp),
-                        color = if (scannerMode == ScannerMode.BARCODE) Color(0xFF0F766E) else Color.Transparent,
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(16.dp))
-                            .clickable {
-                                scannerMode = ScannerMode.BARCODE
-                                currentAnalyzer?.scannerMode = ScannerMode.BARCODE
-                            }
-                            .testTag("mode_barcode_chip")
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.QrCode,
-                                contentDescription = null,
-                                tint = Color.White,
-                                modifier = Modifier.size(15.dp)
-                            )
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text(
-                                text = "Barcode Garis",
-                                color = Color.White,
-                                fontSize = 12.sp,
-                                fontWeight = if (scannerMode == ScannerMode.BARCODE) FontWeight.Bold else FontWeight.Normal
-                            )
-                        }
-                    }
-
-                    Surface(
-                        shape = RoundedCornerShape(16.dp),
-                        color = if (scannerMode == ScannerMode.OCR_CONTRACT) Color(0xFF0F766E) else Color.Transparent,
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(16.dp))
-                            .clickable {
-                                scannerMode = ScannerMode.OCR_CONTRACT
-                                currentAnalyzer?.scannerMode = ScannerMode.OCR_CONTRACT
-                            }
-                            .testTag("mode_ocr_chip")
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.TextFields,
-                                contentDescription = null,
-                                tint = Color.White,
-                                modifier = Modifier.size(15.dp)
-                            )
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text(
-                                text = "Teks No. Kontrak (OCR)",
-                                color = Color.White,
-                                fontSize = 12.sp,
-                                fontWeight = if (scannerMode == ScannerMode.OCR_CONTRACT) FontWeight.Bold else FontWeight.Normal
-                            )
-                        }
-                    }
+                    Icon(
+                        imageVector = Icons.Default.QrCode,
+                        contentDescription = null,
+                        tint = Color(0xFF10B981),
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "Arahkan kotak ke garis barcode",
+                        color = Color.White,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Medium
+                    )
                 }
             }
         }
@@ -534,7 +482,7 @@ fun CameraScannerView(
             exit = fadeOut() + slideOutVertically { -it },
             modifier = Modifier
                 .align(Alignment.TopCenter)
-                .padding(top = 138.dp)
+                .padding(top = 96.dp)
         ) {
             Surface(
                 shape = RoundedCornerShape(16.dp),
@@ -664,9 +612,7 @@ fun CameraScannerView(
                     }
 
                     Text(
-                        text = if (scannerMode == ScannerMode.OCR_CONTRACT) {
-                            "Arahkan kamera ke tulisan Nomor Kontrak (contoh: CCTSMG...)"
-                        } else if (autoScanEnabled) {
+                        text = if (autoScanEnabled) {
                             "Tekan tombol foto jika barcode sulit fokus / bergerak"
                         } else {
                             "Arahkan barcode, lalu tekan tombol foto"

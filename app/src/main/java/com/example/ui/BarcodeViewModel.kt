@@ -302,12 +302,24 @@ class BarcodeViewModel(
         try {
             val image = InputImage.fromFilePath(appContext, uri)
             val options = BarcodeScannerOptions.Builder()
-                .setBarcodeFormats(Barcode.FORMAT_ALL_FORMATS)
+                .setBarcodeFormats(
+                    Barcode.FORMAT_CODE_128,
+                    Barcode.FORMAT_CODE_39,
+                    Barcode.FORMAT_EAN_13,
+                    Barcode.FORMAT_EAN_8,
+                    Barcode.FORMAT_UPC_A,
+                    Barcode.FORMAT_UPC_E,
+                    Barcode.FORMAT_QR_CODE,
+                    Barcode.FORMAT_DATA_MATRIX,
+                    Barcode.FORMAT_ITF
+                )
                 .build()
             val scanner = BarcodeScanning.getClient(options)
             scanner.process(image)
                 .addOnSuccessListener { barcodes ->
-                    val first = barcodes.firstOrNull { !it.rawValue.isNullOrBlank() }
+                    val first = barcodes.firstOrNull { 
+                        !it.rawValue.isNullOrBlank() && BarcodeAnalyzer.isValidBarcode(it.rawValue!!, it.format)
+                    }
                     if (first != null) {
                         val raw = first.rawValue!!.trim()
                         val cleanedCode = BarcodeAnalyzer.cleanBarcodeValue(raw, first.format)

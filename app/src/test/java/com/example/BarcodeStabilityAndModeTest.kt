@@ -10,6 +10,22 @@ import org.junit.Test
 class BarcodeStabilityAndModeTest {
 
     @Test
+    fun testRejectionOfTextMisreadsWithSpacesAndPeriods() {
+        // Accidental Code 39 reads on printed text paragraphs
+        assertFalse(BarcodeAnalyzer.isValidBarcode("W .605Y02", Barcode.FORMAT_CODE_39))
+        assertFalse(BarcodeAnalyzer.isValidBarcode("46 .W05YZ.", Barcode.FORMAT_CODE_39))
+        assertFalse(BarcodeAnalyzer.isValidBarcode("W .605E02", Barcode.FORMAT_CODE_39))
+        assertFalse(BarcodeAnalyzer.isValidBarcode(".605Y02.", Barcode.FORMAT_CODE_39))
+        assertFalse(BarcodeAnalyzer.isValidBarcode("AB", Barcode.FORMAT_CODE_39)) // Too short
+
+        // Genuine barcodes should be accepted
+        assertTrue(BarcodeAnalyzer.isValidBarcode("CCTSMG26020583", Barcode.FORMAT_CODE_39))
+        assertTrue(BarcodeAnalyzer.isValidBarcode("*CCTSMG26020583*", Barcode.FORMAT_CODE_39))
+        assertTrue(BarcodeAnalyzer.isValidBarcode("4642605902", Barcode.FORMAT_CODE_39))
+        assertTrue(BarcodeAnalyzer.isValidBarcode("8991234567890", Barcode.FORMAT_EAN_13))
+    }
+
+    @Test
     fun testCode39BarcodeCleaningStripsAsterisks() {
         // Code 39 uses * as start/stop delimiters, which causes ML Kit to sometimes read "*CCTSMG26020583*" instead of "CCTSMG26020583"
         val rawWithAsterisks = "*CCTSMG26020583*"
