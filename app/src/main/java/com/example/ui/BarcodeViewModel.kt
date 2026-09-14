@@ -91,6 +91,10 @@ class BarcodeViewModel(
     private val _preventDuplicates = MutableStateFlow(true)
     val preventDuplicates = _preventDuplicates.asStateFlow()
 
+    // Strict Numeric Only Mode toggle (Default: false)
+    private val _numericOnlyMode = MutableStateFlow(false)
+    val numericOnlyMode = _numericOnlyMode.asStateFlow()
+
     // Event notifications for UI (e.g. snackbar or dialog when item scanned)
     private val _scanEvent = MutableSharedFlow<BarcodeEntity>()
     val scanEvent = _scanEvent.asSharedFlow()
@@ -183,6 +187,10 @@ class BarcodeViewModel(
         _preventDuplicates.value = !_preventDuplicates.value
     }
 
+    fun toggleNumericOnlyMode() {
+        _numericOnlyMode.value = !_numericOnlyMode.value
+    }
+
     fun setSearchQuery(query: String) {
         _searchQuery.value = query
     }
@@ -195,8 +203,16 @@ class BarcodeViewModel(
      * Called when Camera Analyzer detects a barcode
      */
     fun onBarcodeDetected(code: String, format: String) {
-        val trimmedCode = code.trim()
+        var trimmedCode = code.trim()
         if (trimmedCode.isBlank()) return
+
+        // Auto-correct optical near-numeric misreads if predominately numeric
+        trimmedCode = BarcodeAnalyzer.autoCorrectNearNumericCode(trimmedCode)
+
+        // If numeric only mode is active, strictly reject barcodes containing letters
+        if (_numericOnlyMode.value && !trimmedCode.all { it.isDigit() }) {
+            return
+        }
 
         val now = System.currentTimeMillis()
         if (trimmedCode == lastScannedCode && (now - lastScannedTime) < scanCooldownMs) {
@@ -317,13 +333,26 @@ class BarcodeViewModel(
             val scanner = BarcodeScanning.getClient(options)
             scanner.process(image)
                 .addOnSuccessListener { barcodes ->
-                    val first = barcodes.firstOrNull { 
+                    val validList = barcodes.filter { 
                         !it.rawValue.isNullOrBlank() && BarcodeAnalyzer.isValidBarcode(it.rawValue!!, it.format)
                     }
-                    if (first != null) {
-                        val raw = first.rawValue!!.trim()
-                        val cleanedCode = BarcodeAnalyzer.cleanBarcodeValue(raw, first.format)
-                        val format = BarcodeAnalyzer.getFormatName(first.format)
+
+                    val chosen = if (_numericOnlyMode.value) {
+                        validList.firstOrNull {
+                            val code = BarcodeAnalyzer.cleanBarcodeValue(it.rawValue ?: "", it.format)
+                            code.isNotEmpty() && code.all { ch -> ch.isDigit() }
+                        }
+                    } else {
+                        validList.sortedByDescending {
+                            val code = BarcodeAnalyzer.cleanBarcodeValue(it.rawValue ?: "", it.format)
+                            if (code.isNotEmpty() && code.all { ch -> ch.isDigit() }) 1 else 0
+                        }.firstOrNull()
+                    }
+
+                    if (chosen != null) {
+                        val raw = chosen.rawValue!!.trim()
+                        val cleanedCode = BarcodeAnalyzer.cleanBarcodeValue(raw, chosen.format)
+                        val format = BarcodeAnalyzer.getFormatName(chosen.format)
                         viewModelScope.launch {
                             val existing = repository.findByCode(cleanedCode)
                             if (existing != null && _preventDuplicates.value) {
@@ -337,38 +366,37 @@ class BarcodeViewModel(
                             }
                         }
                     } else {
-                        // Fallback: Use OCR Text Recognition to read Contract Number text
+                        // Fallback: Use OCR Text Recognition to read barcode numeric text (e.g. "* 4 7 6 2 6 0 4 8 3 9 *")
                         val textRecognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
                         textRecognizer.process(image)
                             .addOnSuccessListener { visionText ->
-                                val candidates = mutableListOf<String>()
+                                var foundNumericCode: String? = null
+
                                 for (block in visionText.textBlocks) {
                                     for (line in block.lines) {
-                                        val words = line.text.trim().split("\\s+".toRegex())
-                                        for (w in words) {
-                                            val clean = w.replace("[^A-Za-z0-9]".toRegex(), "")
-                                            if (clean.length >= 6) {
-                                                candidates.add(clean)
-                                            }
+                                        val text = line.text.trim()
+                                        val digitsOnly = text.filter { it.isDigit() }
+                                        // Match line containing barcode numbers (usually with * delimiters or pure 8+ digits)
+                                        if (digitsOnly.length in 6..24 && (text.contains("*") || digitsOnly.length >= 8)) {
+                                            foundNumericCode = digitsOnly
+                                            break
                                         }
                                     }
+                                    if (foundNumericCode != null) break
                                 }
-                                val distinct = candidates.distinct()
-                                val contractCandidate = distinct.firstOrNull { c ->
-                                    c.any { it.isLetter() } && c.any { it.isDigit() } && c.length in 8..24
-                                } ?: distinct.firstOrNull { it.length in 8..24 }
 
-                                if (contractCandidate != null) {
+                                if (foundNumericCode != null) {
+                                    val finalCode = BarcodeAnalyzer.autoCorrectNearNumericCode(foundNumericCode)
                                     viewModelScope.launch {
-                                        val existing = repository.findByCode(contractCandidate)
+                                        val existing = repository.findByCode(finalCode)
                                         if (existing != null && _preventDuplicates.value) {
                                             playDuplicateBeep()
                                             triggerHapticFeedback(isError = true)
-                                            _duplicateEvent.emit(contractCandidate)
-                                            onResult(false, "Nomor Kontrak $contractCandidate sudah terdaftar (Duplikat dicegah).")
+                                            _duplicateEvent.emit(finalCode)
+                                            onResult(false, "Barcode $finalCode sudah terdaftar (Duplikat dicegah).")
                                         } else {
-                                            onBarcodeDetected(contractCandidate, "NOMOR_KONTRAK")
-                                            onResult(true, "Berhasil mengenali Nomor Kontrak: $contractCandidate")
+                                            onBarcodeDetected(finalCode, "CODE_39")
+                                            onResult(true, "Berhasil mengenali Barcode: $finalCode")
                                         }
                                     }
                                 } else {

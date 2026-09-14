@@ -39,6 +39,23 @@ class BarcodeStabilityAndModeTest {
         val numericCode39 = "*4642605902*"
         val cleanedNumeric = BarcodeAnalyzer.cleanBarcodeValue(numericCode39, Barcode.FORMAT_CODE_39)
         assertEquals("4642605902", cleanedNumeric)
+
+        // Spaced barcodes often found on printed labels e.g. "* 4 7 6 2 6 0 4 8 3 9 *"
+        val spacedBarcode = "* 4 7 6 2 6 0 4 8 3 9 *"
+        val cleanedSpaced = BarcodeAnalyzer.cleanBarcodeValue(spacedBarcode, Barcode.FORMAT_CODE_39)
+        assertEquals("4762604839", cleanedSpaced)
+    }
+
+    @Test
+    fun testAutoCorrectNearNumericCode() {
+        // Letters optical misreads for digits: 'O'->'0', 'I'->'1', 'S'->'5'
+        val misreadCode = "47626O4839" // Contains 'O' instead of '0'
+        val corrected = BarcodeAnalyzer.autoCorrectNearNumericCode(misreadCode)
+        assertEquals("4762604839", corrected)
+
+        val misreadCode2 = "464260S902" // Contains 'S' instead of '5'
+        val corrected2 = BarcodeAnalyzer.autoCorrectNearNumericCode(misreadCode2)
+        assertEquals("4642605902", corrected2)
     }
 
     @Test

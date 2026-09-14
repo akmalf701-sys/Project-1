@@ -193,6 +193,7 @@ fun BarcodeScannerApp(viewModel: BarcodeViewModel) {
     val hapticsEnabled by viewModel.hapticsEnabled.collectAsState()
     val soundEnabled by viewModel.soundEnabled.collectAsState()
     val preventDuplicates by viewModel.preventDuplicates.collectAsState()
+    val numericOnlyMode by viewModel.numericOnlyMode.collectAsState()
 
     Scaffold(
         snackbarHost = { SnackbarHost(snackbarHostState) },
@@ -299,6 +300,8 @@ fun BarcodeScannerApp(viewModel: BarcodeViewModel) {
                         onToggleSound = { viewModel.toggleSound() },
                         preventDuplicates = preventDuplicates,
                         onTogglePreventDuplicates = { viewModel.togglePreventDuplicates() },
+                        numericOnlyMode = numericOnlyMode,
+                        onToggleNumericOnlyMode = { viewModel.toggleNumericOnlyMode() },
                         autoScanEnabled = isContinuousMode,
                         onToggleAutoScan = { viewModel.toggleContinuousMode() },
                         onPickPhoto = {
@@ -425,6 +428,8 @@ fun ScannerTabContent(
     onToggleSound: () -> Unit,
     preventDuplicates: Boolean,
     onTogglePreventDuplicates: () -> Unit,
+    numericOnlyMode: Boolean = false,
+    onToggleNumericOnlyMode: () -> Unit = {},
     autoScanEnabled: Boolean = true,
     onToggleAutoScan: () -> Unit = {},
     onPickPhoto: () -> Unit,
@@ -445,6 +450,8 @@ fun ScannerTabContent(
                 isTorchOn = isTorchOn,
                 useFrontCamera = useFrontCamera,
                 autoScanEnabled = autoScanEnabled,
+                numericOnlyMode = numericOnlyMode,
+                onToggleNumericOnlyMode = onToggleNumericOnlyMode,
                 onToggleAutoScan = onToggleAutoScan,
                 onBarcodeDetected = onBarcodeDetected
             )
@@ -524,6 +531,25 @@ fun ScannerTabContent(
                         imageVector = Icons.Default.Shield,
                         contentDescription = if (preventDuplicates) "Anti-Duplikat Aktif" else "Anti-Duplikat Nonaktif",
                         modifier = Modifier.size(20.dp)
+                    )
+                }
+
+                // Strict Numeric Only mode toggle (123 Only)
+                IconButton(
+                    onClick = onToggleNumericOnlyMode,
+                    modifier = Modifier
+                        .size(38.dp)
+                        .testTag("numeric_only_toggle"),
+                    colors = IconButtonDefaults.iconButtonColors(
+                        containerColor = if (numericOnlyMode) Color(0xFF0D9488) else Color(0x33FFFFFF),
+                        contentColor = Color.White
+                    )
+                ) {
+                    Text(
+                        text = "123",
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = Color.White
                     )
                 }
 

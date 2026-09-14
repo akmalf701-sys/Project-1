@@ -3,6 +3,7 @@ package com.example.ui.scanner
 import android.graphics.Bitmap
 import android.util.Log
 import android.view.ViewGroup
+import androidx.camera.core.AspectRatio
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.FocusMeteringAction
@@ -11,6 +12,9 @@ import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
+import androidx.camera.core.resolutionselector.AspectRatioStrategy
+import androidx.camera.core.resolutionselector.ResolutionSelector
+import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.compose.animation.AnimatedVisibility
@@ -118,6 +122,8 @@ fun CameraScannerView(
     isTorchOn: Boolean = false,
     useFrontCamera: Boolean = false,
     autoScanEnabled: Boolean = true,
+    numericOnlyMode: Boolean = false,
+    onToggleNumericOnlyMode: () -> Unit = {},
     onToggleAutoScan: () -> Unit = {},
     onBarcodeDetected: (code: String, format: String) -> Unit
 ) {
@@ -134,7 +140,7 @@ fun CameraScannerView(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT
             )
-            scaleType = PreviewView.ScaleType.FILL_CENTER
+            scaleType = PreviewView.ScaleType.FIT_CENTER
             // COMPATIBLE (TextureView) avoids SurfaceView BLASTBufferQueue abandoned errors during Compose recomposition & screen navigation
             implementationMode = PreviewView.ImplementationMode.COMPATIBLE
         }
@@ -151,9 +157,12 @@ fun CameraScannerView(
     var tapFocusPoint by remember { mutableStateOf<Offset?>(null) }
     val coroutineScope = rememberCoroutineScope()
 
-    // Synchronize autoScanEnabled with analyzer
+    // Synchronize autoScanEnabled and numericOnlyMode with analyzer
     LaunchedEffect(autoScanEnabled, currentAnalyzer) {
         currentAnalyzer?.autoScanEnabled = autoScanEnabled
+    }
+    LaunchedEffect(numericOnlyMode, currentAnalyzer) {
+        currentAnalyzer?.numericOnlyMode = numericOnlyMode
     }
 
     // Toggle torch when state changes
@@ -176,7 +185,7 @@ fun CameraScannerView(
         currentAnalyzer?.resetDetectionState()
     }
 
-    // Helper to decode barcode and OCR on a still frozen bitmap
+    // Helper to decode barcode on a still frozen bitmap
     fun processStillImage(bmp: Bitmap) {
         frozenBitmap = bmp
         currentAnalyzer?.isPaused = true
@@ -186,22 +195,45 @@ fun CameraScannerView(
         freezeOcrCandidates = emptyList()
 
         val inputImage = InputImage.fromBitmap(bmp, 0)
+        // Strictly exclude CODABAR & CODE_93 which misread label text
         val options = BarcodeScannerOptions.Builder()
-            .setBarcodeFormats(Barcode.FORMAT_ALL_FORMATS)
+            .setBarcodeFormats(
+                Barcode.FORMAT_CODE_128,
+                Barcode.FORMAT_CODE_39,
+                Barcode.FORMAT_EAN_13,
+                Barcode.FORMAT_EAN_8,
+                Barcode.FORMAT_UPC_A,
+                Barcode.FORMAT_UPC_E,
+                Barcode.FORMAT_ITF,
+                Barcode.FORMAT_QR_CODE,
+                Barcode.FORMAT_DATA_MATRIX
+            )
             .build()
         val stillScanner = BarcodeScanning.getClient(options)
         val textRecognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
 
         stillScanner.process(inputImage)
             .addOnSuccessListener { barcodes ->
-                val validBarcode = barcodes.firstOrNull {
+                val validList = barcodes.filter {
                     !it.rawValue.isNullOrBlank() && BarcodeAnalyzer.isValidBarcode(it.rawValue!!, it.format)
                 }
 
-                if (validBarcode != null) {
-                    val raw = validBarcode.rawValue!!.trim()
-                    val code = BarcodeAnalyzer.cleanBarcodeValue(raw, validBarcode.format)
-                    val format = BarcodeAnalyzer.getFormatName(validBarcode.format)
+                val chosenBarcode = if (numericOnlyMode) {
+                    validList.firstOrNull {
+                        val code = BarcodeAnalyzer.cleanBarcodeValue(it.rawValue ?: "", it.format)
+                        code.isNotEmpty() && code.all { ch -> ch.isDigit() }
+                    }
+                } else {
+                    validList.sortedByDescending {
+                        val code = BarcodeAnalyzer.cleanBarcodeValue(it.rawValue ?: "", it.format)
+                        if (code.isNotEmpty() && code.all { ch -> ch.isDigit() }) 1 else 0
+                    }.firstOrNull()
+                }
+
+                if (chosenBarcode != null) {
+                    val raw = chosenBarcode.rawValue!!.trim()
+                    val code = BarcodeAnalyzer.cleanBarcodeValue(raw, chosenBarcode.format)
+                    val format = BarcodeAnalyzer.getFormatName(chosenBarcode.format)
                     freezeResultCode = code
                     onBarcodeDetected(code, format)
                     isProcessingFreeze = false
@@ -214,27 +246,39 @@ fun CameraScannerView(
                         }
                     }
                 } else {
-                    // Barcode not detected, check if OCR can find a contract number candidate to suggest
+                    // If barcode line not decoded, search OCR exclusively for the barcode numeric string
+                    // (e.g. "* 4 7 6 2 6 0 4 8 3 9 *" printed directly under the barcode)
                     textRecognizer.process(inputImage)
                         .addOnSuccessListener { visionText ->
-                            val candidates = mutableListOf<String>()
+                            var foundNumericBarcode: String? = null
                             for (block in visionText.textBlocks) {
                                 for (line in block.lines) {
-                                    val words = line.text.trim().split("\\s+".toRegex())
-                                    for (w in words) {
-                                        val clean = w.replace("[^A-Za-z0-9]".toRegex(), "")
-                                        if (clean.length >= 6) {
-                                            candidates.add(clean)
-                                        }
+                                    val text = line.text.trim()
+                                    // Check if line looks like "* 4 7 6 2 6 0 4 8 3 9 *" or "4762604839"
+                                    val digitsOnly = text.filter { it.isDigit() }
+                                    if (digitsOnly.length in 6..24 && (text.contains("*") || digitsOnly.length >= 8)) {
+                                        foundNumericBarcode = digitsOnly
+                                        break
                                     }
                                 }
+                                if (foundNumericBarcode != null) break
                             }
-                            val distinct = candidates.distinct().filter { c ->
-                                c.length in 8..24 && (c.any { it.isDigit() })
+
+                            if (foundNumericBarcode != null) {
+                                val cleanCode = BarcodeAnalyzer.autoCorrectNearNumericCode(foundNumericBarcode)
+                                freezeResultCode = cleanCode
+                                onBarcodeDetected(cleanCode, "CODE_39")
+                                isProcessingFreeze = false
+                                coroutineScope.launch {
+                                    delay(1800)
+                                    if (frozenBitmap != null) {
+                                        resumeLiveCamera()
+                                    }
+                                }
+                            } else {
+                                freezeFailedMessage = "Garis barcode belum terdeteksi jelas. Posisikan barcode di dalam kotak bidik."
+                                isProcessingFreeze = false
                             }
-                            freezeOcrCandidates = distinct
-                            freezeFailedMessage = "Garis barcode belum terdeteksi jelas. Pastikan barcode berada di dalam kotak tengah dan gunakan tombol Zoom 1.5x / 2x."
-                            isProcessingFreeze = false
                         }
                         .addOnFailureListener {
                             freezeFailedMessage = "Garis barcode belum terdeteksi jelas. Pastikan barcode berada di dalam kotak tengah."
@@ -324,9 +368,24 @@ fun CameraScannerView(
                 cameraProvider = provider
                 provider.unbindAll()
 
-                @Suppress("DEPRECATION")
+                // Fixed high-resolution 16:9 aspect ratio selector to prevent automatic zooming, stretching, or sensor cropping
+                val highResResolutionSelector = ResolutionSelector.Builder()
+                    .setAspectRatioStrategy(
+                        AspectRatioStrategy(
+                            AspectRatio.RATIO_16_9,
+                            AspectRatioStrategy.FALLBACK_RULE_AUTO
+                        )
+                    )
+                    .setResolutionStrategy(
+                        ResolutionStrategy(
+                            android.util.Size(1920, 1080),
+                            ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER
+                        )
+                    )
+                    .build()
+
                 val preview = Preview.Builder()
-                    .setTargetResolution(android.util.Size(1920, 1080))
+                    .setResolutionSelector(highResResolutionSelector)
                     .build()
                     .also {
                         it.surfaceProvider = previewView.surfaceProvider
@@ -338,13 +397,13 @@ fun CameraScannerView(
                     }
                 ).apply {
                     this.autoScanEnabled = autoScanEnabled
+                    this.numericOnlyMode = numericOnlyMode
                 }
                 currentAnalyzer = analyzer
 
-                // Full HD 1920x1080 ensures ultra-sharp barcode lines and 100% digit accuracy
-                @Suppress("DEPRECATION")
+                // ImageAnalysis with matching fixed high-resolution selector prevents zooming and distortion
                 val imageAnalysis = ImageAnalysis.Builder()
-                    .setTargetResolution(android.util.Size(1920, 1080))
+                    .setResolutionSelector(highResResolutionSelector)
                     .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                     .build()
                     .also {
@@ -352,6 +411,7 @@ fun CameraScannerView(
                     }
 
                 val capture = ImageCapture.Builder()
+                    .setResolutionSelector(highResResolutionSelector)
                     .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
                     .build()
                 imageCapture = capture
@@ -518,7 +578,7 @@ fun CameraScannerView(
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    // Zoom selector bar (1.0x, 1.5x, 2.0x) - Helps focus clearly on tiny barcode stickers
+                    // Zoom selector bar (1.0x, 1.5x, 2.0x) + Numeric-Only Mode Toggle
                     Row(
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                         verticalAlignment = Alignment.CenterVertically
@@ -545,6 +605,25 @@ fun CameraScannerView(
                                     modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
                                 )
                             }
+                        }
+
+                        // Toggle Mode Hanya Angka (Mencegah salah baca teks/huruf label sembarangan)
+                        Surface(
+                            shape = RoundedCornerShape(14.dp),
+                            color = if (numericOnlyMode) Color(0xFF0D9488) else Color(0xAA0F172A),
+                            border = BorderStroke(1.dp, if (numericOnlyMode) Color(0xFF5EEAD4) else Color(0x33FFFFFF)),
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(14.dp))
+                                .clickable { onToggleNumericOnlyMode() }
+                                .testTag("toggle_numeric_only_mode")
+                        ) {
+                            Text(
+                                text = if (numericOnlyMode) "🔢 123 Angka ON" else "🔢 123 Angka OFF",
+                                color = Color.White,
+                                fontSize = 11.sp,
+                                fontWeight = if (numericOnlyMode) FontWeight.Bold else FontWeight.Medium,
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                            )
                         }
                     }
 
