@@ -40,6 +40,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -48,9 +49,13 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.CameraAlt
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.QrCode
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.TextFields
 import androidx.compose.material.icons.filled.WarningAmber
+import androidx.compose.material.icons.filled.ZoomIn
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -63,8 +68,10 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -84,11 +91,13 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
@@ -97,6 +106,10 @@ import com.google.mlkit.vision.barcode.BarcodeScannerOptions
 import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.common.InputImage
+import com.google.mlkit.vision.text.TextRecognition
+import com.google.mlkit.vision.text.latin.TextRecognizerOptions
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import java.util.concurrent.Executors
 
 @Composable
@@ -132,10 +145,20 @@ fun CameraScannerView(
     var isProcessingFreeze by remember { mutableStateOf(false) }
     var freezeResultCode by remember { mutableStateOf<String?>(null) }
     var freezeFailedMessage by remember { mutableStateOf<String?>(null) }
+    var freezeOcrCandidates by remember { mutableStateOf<List<String>>(emptyList()) }
 
-    // Synchronize autoScanEnabled with analyzer
+    // Scanner Mode (Barcode Garis vs Scan Teks Nomor Kontrak OCR)
+    var scannerMode by remember { mutableStateOf(ScannerMode.BARCODE) }
+    var zoomRatio by remember { mutableFloatStateOf(1.0f) }
+    var tapFocusPoint by remember { mutableStateOf<Offset?>(null) }
+    val coroutineScope = rememberCoroutineScope()
+
+    // Synchronize autoScanEnabled and scannerMode with analyzer
     LaunchedEffect(autoScanEnabled, currentAnalyzer) {
         currentAnalyzer?.autoScanEnabled = autoScanEnabled
+    }
+    LaunchedEffect(scannerMode, currentAnalyzer) {
+        currentAnalyzer?.scannerMode = scannerMode
     }
 
     // Toggle torch when state changes
@@ -147,40 +170,81 @@ fun CameraScannerView(
         }
     }
 
-    // Helper to decode barcode on a still frozen bitmap
+    // Helper to decode barcode and OCR on a still frozen bitmap
     fun processStillImage(bmp: Bitmap) {
         frozenBitmap = bmp
         currentAnalyzer?.isPaused = true
         isProcessingFreeze = true
         freezeResultCode = null
         freezeFailedMessage = null
+        freezeOcrCandidates = emptyList()
 
         val inputImage = InputImage.fromBitmap(bmp, 0)
         val options = BarcodeScannerOptions.Builder()
             .setBarcodeFormats(Barcode.FORMAT_ALL_FORMATS)
             .build()
         val stillScanner = BarcodeScanning.getClient(options)
+        val textRecognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
+
         stillScanner.process(inputImage)
             .addOnSuccessListener { barcodes ->
-                isProcessingFreeze = false
                 val validBarcode = barcodes.firstOrNull { !it.rawValue.isNullOrBlank() }
                 if (validBarcode != null) {
-                    val code = validBarcode.rawValue!!.trim()
+                    val raw = validBarcode.rawValue!!.trim()
+                    val code = BarcodeAnalyzer.cleanBarcodeValue(raw, validBarcode.format)
                     val format = BarcodeAnalyzer.getFormatName(validBarcode.format)
                     freezeResultCode = code
                     onBarcodeDetected(code, format)
-                } else {
-                    freezeFailedMessage = "Barcode tidak terdeteksi pada foto ini. Pastikan garis barcode berada dalam kotak tengah dan tidak tertutup."
                 }
+
+                // Also run OCR text recognition to read contract numbers (e.g. CCTSMG26020583)
+                textRecognizer.process(inputImage)
+                    .addOnSuccessListener { visionText ->
+                        val candidates = mutableListOf<String>()
+                        for (block in visionText.textBlocks) {
+                            for (line in block.lines) {
+                                val words = line.text.trim().split("\\s+".toRegex())
+                                for (w in words) {
+                                    val clean = w.replace("[^A-Za-z0-9]".toRegex(), "")
+                                    if (clean.length >= 6) {
+                                        candidates.add(clean)
+                                    }
+                                }
+                            }
+                        }
+                        val distinct = candidates.distinct()
+                        freezeOcrCandidates = distinct
+
+                        if (scannerMode == ScannerMode.OCR_CONTRACT || freezeResultCode == null) {
+                            val contractCandidate = distinct.firstOrNull { c ->
+                                c.any { it.isLetter() } && c.any { it.isDigit() } && c.length in 8..24
+                            } ?: distinct.firstOrNull { it.length in 8..24 }
+
+                            if (contractCandidate != null) {
+                                freezeResultCode = contractCandidate
+                                onBarcodeDetected(contractCandidate, "NOMOR_KONTRAK")
+                            } else if (freezeResultCode == null) {
+                                freezeFailedMessage = "Barcode atau Nomor Kontrak belum terdeteksi jelas. Coba atur Zoom 1.5x / 2x lalu bidik lagi."
+                            }
+                        }
+                        isProcessingFreeze = false
+                    }
+                    .addOnFailureListener {
+                        isProcessingFreeze = false
+                        if (freezeResultCode == null) {
+                            freezeFailedMessage = "Barcode tidak terdeteksi. Gunakan tombol Zoom atau bidik lebih dekat."
+                        }
+                    }
+                    .addOnCompleteListener {
+                        try { textRecognizer.close() } catch (_: Exception) {}
+                    }
             }
             .addOnFailureListener {
                 isProcessingFreeze = false
                 freezeFailedMessage = "Gagal memproses gambar bidikan."
             }
             .addOnCompleteListener {
-                try {
-                    stillScanner.close()
-                } catch (_: Exception) {}
+                try { stillScanner.close() } catch (_: Exception) {}
             }
     }
 
@@ -235,6 +299,7 @@ fun CameraScannerView(
         isProcessingFreeze = false
         freezeResultCode = null
         freezeFailedMessage = null
+        freezeOcrCandidates = emptyList()
         currentAnalyzer?.isPaused = false
     }
 
@@ -257,17 +322,20 @@ fun CameraScannerView(
                         it.surfaceProvider = previewView.surfaceProvider
                     }
 
-                val analyzer = BarcodeAnalyzer { code, format ->
-                    onBarcodeDetected(code, format)
-                }.apply {
+                val analyzer = BarcodeAnalyzer(
+                    onBarcodeDetected = { code, format ->
+                        onBarcodeDetected(code, format)
+                    }
+                ).apply {
                     this.autoScanEnabled = autoScanEnabled
+                    this.scannerMode = scannerMode
                 }
                 currentAnalyzer = analyzer
 
-                // 640x480 is optimal for barcode scanning, reducing memory and binder IPC traffic by 67%
+                // High Definition 1280x720 ensures crystal-clear barcode lines and OCR sharpness
                 @Suppress("DEPRECATION")
                 val imageAnalysis = ImageAnalysis.Builder()
-                    .setTargetResolution(android.util.Size(640, 480))
+                    .setTargetResolution(android.util.Size(1280, 720))
                     .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                     .build()
                     .also {
@@ -285,13 +353,16 @@ fun CameraScannerView(
                     CameraSelector.DEFAULT_BACK_CAMERA
                 }
 
-                camera = provider.bindToLifecycle(
+                val boundCamera = provider.bindToLifecycle(
                     lifecycleOwner,
                     cameraSelector,
                     preview,
                     imageAnalysis,
                     capture
                 )
+                camera = boundCamera
+                // Re-apply zoom if set
+                boundCamera.cameraControl.setZoomRatio(zoomRatio)
             } catch (e: Exception) {
                 Log.e("CameraScanner", "Camera bind failed", e)
             }
@@ -320,9 +391,18 @@ fun CameraScannerView(
             .fillMaxSize()
             .pointerInput(Unit) {
                 detectTapGestures { offset ->
+                    tapFocusPoint = offset
+                    coroutineScope.launch {
+                        delay(1500)
+                        if (tapFocusPoint == offset) {
+                            tapFocusPoint = null
+                        }
+                    }
                     val factory = previewView.meteringPointFactory
                     val point = factory.createPoint(offset.x, offset.y)
-                    val action = FocusMeteringAction.Builder(point).build()
+                    val action = FocusMeteringAction.Builder(point, FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE)
+                        .setAutoCancelDuration(2, java.util.concurrent.TimeUnit.SECONDS)
+                        .build()
                     camera?.cameraControl?.startFocusAndMetering(action)
                 }
             }
@@ -349,7 +429,105 @@ fun CameraScannerView(
             isFrozen = frozenBitmap != null
         )
 
-        // 4. Frozen Status Badge at Top
+        // Tap-to-focus visual ring indicator
+        val density = LocalDensity.current
+        val ringHalfSizePx = with(density) { 30.dp.roundToPx() }
+        tapFocusPoint?.let { pt ->
+            Box(
+                modifier = Modifier
+                    .offset {
+                        IntOffset(
+                            pt.x.toInt() - ringHalfSizePx,
+                            pt.y.toInt() - ringHalfSizePx
+                        )
+                    }
+                    .size(60.dp)
+                    .border(2.dp, Color(0xFFFBBF24), CircleShape)
+            )
+        }
+
+        // 4. Scanner Mode Switcher (Barcode vs OCR Teks No. Kontrak)
+        AnimatedVisibility(
+            visible = frozenBitmap == null,
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .padding(top = 96.dp)
+        ) {
+            Surface(
+                shape = RoundedCornerShape(20.dp),
+                color = Color(0xD00F172A),
+                border = BorderStroke(1.dp, Color(0x33FFFFFF))
+            ) {
+                Row(
+                    modifier = Modifier.padding(4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Surface(
+                        shape = RoundedCornerShape(16.dp),
+                        color = if (scannerMode == ScannerMode.BARCODE) Color(0xFF0F766E) else Color.Transparent,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(16.dp))
+                            .clickable {
+                                scannerMode = ScannerMode.BARCODE
+                                currentAnalyzer?.scannerMode = ScannerMode.BARCODE
+                            }
+                            .testTag("mode_barcode_chip")
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.QrCode,
+                                contentDescription = null,
+                                tint = Color.White,
+                                modifier = Modifier.size(15.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = "Barcode Garis",
+                                color = Color.White,
+                                fontSize = 12.sp,
+                                fontWeight = if (scannerMode == ScannerMode.BARCODE) FontWeight.Bold else FontWeight.Normal
+                            )
+                        }
+                    }
+
+                    Surface(
+                        shape = RoundedCornerShape(16.dp),
+                        color = if (scannerMode == ScannerMode.OCR_CONTRACT) Color(0xFF0F766E) else Color.Transparent,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(16.dp))
+                            .clickable {
+                                scannerMode = ScannerMode.OCR_CONTRACT
+                                currentAnalyzer?.scannerMode = ScannerMode.OCR_CONTRACT
+                            }
+                            .testTag("mode_ocr_chip")
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.TextFields,
+                                contentDescription = null,
+                                tint = Color.White,
+                                modifier = Modifier.size(15.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = "Teks No. Kontrak (OCR)",
+                                color = Color.White,
+                                fontSize = 12.sp,
+                                fontWeight = if (scannerMode == ScannerMode.OCR_CONTRACT) FontWeight.Bold else FontWeight.Normal
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        // 5. Frozen Status Badge at Top
         AnimatedVisibility(
             visible = frozenBitmap != null,
             enter = fadeIn() + slideInVertically { -it },
@@ -384,7 +562,7 @@ fun CameraScannerView(
             }
         }
 
-        // 5. Bottom Controls: Shutter Button / Freeze Controls & Mode Toggle
+        // 6. Bottom Controls: Zoom + Shutter Button + Results
         Box(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
@@ -393,11 +571,41 @@ fun CameraScannerView(
             contentAlignment = Alignment.Center
         ) {
             if (frozenBitmap == null) {
-                // Live View Mode: Shutter Button & Scan Mode Chip
+                // Live View Mode: Zoom buttons + Shutter Button & Scan Mode Chip
                 Column(
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
+                    // Zoom selector bar (1.0x, 1.5x, 2.0x) - Helps focus clearly on tiny barcode stickers
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        listOf(1.0f to "1.0x", 1.5f to "1.5x", 2.0f to "2.0x").forEach { (ratio, label) ->
+                            val isSelected = (zoomRatio == ratio)
+                            Surface(
+                                shape = RoundedCornerShape(14.dp),
+                                color = if (isSelected) Color(0xFF10B981) else Color(0xAA0F172A),
+                                border = BorderStroke(1.dp, if (isSelected) Color.White else Color(0x33FFFFFF)),
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(14.dp))
+                                    .clickable {
+                                        zoomRatio = ratio
+                                        camera?.cameraControl?.setZoomRatio(ratio)
+                                    }
+                                    .testTag("zoom_btn_$label")
+                            ) {
+                                Text(
+                                    text = label,
+                                    color = Color.White,
+                                    fontSize = 11.sp,
+                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                                )
+                            }
+                        }
+                    }
+
                     // Mode Toggle Pill: Auto-Scan vs Manual Photo Shutter
                     Surface(
                         shape = RoundedCornerShape(16.dp),
@@ -456,7 +664,13 @@ fun CameraScannerView(
                     }
 
                     Text(
-                        text = if (autoScanEnabled) "Tekan untuk foto & jeda (Anti-Goyang)" else "Arahkan barcode, lalu tekan tombol foto",
+                        text = if (scannerMode == ScannerMode.OCR_CONTRACT) {
+                            "Arahkan kamera ke tulisan Nomor Kontrak (contoh: CCTSMG...)"
+                        } else if (autoScanEnabled) {
+                            "Tekan tombol foto jika barcode sulit fokus / bergerak"
+                        } else {
+                            "Arahkan barcode, lalu tekan tombol foto"
+                        },
                         color = Color.White.copy(alpha = 0.9f),
                         fontSize = 11.sp,
                         fontWeight = FontWeight.Medium,
@@ -487,7 +701,7 @@ fun CameraScannerView(
                                 )
                                 Spacer(modifier = Modifier.width(12.dp))
                                 Text(
-                                    text = "Membaca barcode dari foto bidikan...",
+                                    text = "Menganalisis barcode & teks label...",
                                     color = Color.White,
                                     fontSize = 13.sp,
                                     fontWeight = FontWeight.Medium
@@ -507,7 +721,7 @@ fun CameraScannerView(
                                 horizontalAlignment = Alignment.CenterHorizontally
                             ) {
                                 Text(
-                                    text = "✅ Barcode Terbidik Jelas!",
+                                    text = "✅ Kode Berhasil Terbaca!",
                                     color = Color(0xFF6EE7B7),
                                     fontWeight = FontWeight.Bold,
                                     fontSize = 13.sp
@@ -522,6 +736,45 @@ fun CameraScannerView(
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis
                                 )
+
+                                // If multiple numbers or contract texts were detected on the label, offer chips to switch
+                                if (freezeOcrCandidates.size > 1) {
+                                    Spacer(modifier = Modifier.height(6.dp))
+                                    Text(
+                                        text = "Teks lain di label (klik jika ini nomor kontrak):",
+                                        color = Color.White.copy(alpha = 0.8f),
+                                        fontSize = 10.sp
+                                    )
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    Row(
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        freezeOcrCandidates.filter { it != freezeResultCode }.take(3).forEach { cand ->
+                                            Surface(
+                                                shape = RoundedCornerShape(8.dp),
+                                                color = Color(0x44FFFFFF),
+                                                border = BorderStroke(0.5.dp, Color(0x66FFFFFF)),
+                                                modifier = Modifier
+                                                    .clip(RoundedCornerShape(8.dp))
+                                                    .clickable {
+                                                        freezeResultCode = cand
+                                                        onBarcodeDetected(cand, "NOMOR_KONTRAK")
+                                                    }
+                                            ) {
+                                                Text(
+                                                    text = cand,
+                                                    color = Color.White,
+                                                    fontSize = 10.sp,
+                                                    fontFamily = FontFamily.Monospace,
+                                                    fontWeight = FontWeight.Bold,
+                                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp)
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+
                                 Spacer(modifier = Modifier.height(10.dp))
                                 Button(
                                     onClick = { resumeLiveCamera() },
@@ -564,7 +817,7 @@ fun CameraScannerView(
                                     )
                                     Spacer(modifier = Modifier.width(6.dp))
                                     Text(
-                                        text = "Barcode Belum Terbaca",
+                                        text = "Kode Belum Terbaca",
                                         color = Color(0xFFFCA5A5),
                                         fontWeight = FontWeight.Bold,
                                         fontSize = 13.sp
@@ -572,7 +825,7 @@ fun CameraScannerView(
                                 }
                                 Spacer(modifier = Modifier.height(4.dp))
                                 Text(
-                                    text = freezeFailedMessage ?: "Pastikan barcode berada tepat di dalam kotak bidik dan tidak silau.",
+                                    text = freezeFailedMessage ?: "Pastikan barcode/nomor kontrak berada di dalam kotak bidik dan gunakan tombol Zoom 1.5x/2x jika stiker kecil.",
                                     color = Color.White.copy(alpha = 0.9f),
                                     fontSize = 11.sp,
                                     textAlign = TextAlign.Center

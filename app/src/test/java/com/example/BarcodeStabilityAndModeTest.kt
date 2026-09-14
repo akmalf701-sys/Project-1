@@ -1,11 +1,42 @@
 package com.example
 
+import com.example.ui.scanner.BarcodeAnalyzer
+import com.google.mlkit.vision.barcode.common.Barcode
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class BarcodeStabilityAndModeTest {
+
+    @Test
+    fun testCode39BarcodeCleaningStripsAsterisks() {
+        // Code 39 uses * as start/stop delimiters, which causes ML Kit to sometimes read "*CCTSMG26020583*" instead of "CCTSMG26020583"
+        val rawWithAsterisks = "*CCTSMG26020583*"
+        val cleaned = BarcodeAnalyzer.cleanBarcodeValue(rawWithAsterisks, Barcode.FORMAT_CODE_39)
+        assertEquals("CCTSMG26020583", cleaned)
+
+        val rawWithoutAsterisks = "CCTSMG26020583"
+        val cleaned2 = BarcodeAnalyzer.cleanBarcodeValue(rawWithoutAsterisks, Barcode.FORMAT_CODE_39)
+        assertEquals("CCTSMG26020583", cleaned2)
+
+        val numericCode39 = "*4642605902*"
+        val cleanedNumeric = BarcodeAnalyzer.cleanBarcodeValue(numericCode39, Barcode.FORMAT_CODE_39)
+        assertEquals("4642605902", cleanedNumeric)
+    }
+
+    @Test
+    fun testContractNumberCandidateExtraction() {
+        val labelWords = listOf("KONTRAK", "NO:", "CCTSMG26020583", "JATENG", "TGL", "05/02/2026")
+        val cleanedCandidates = labelWords.map { it.replace("[^A-Za-z0-9]".toRegex(), "") }
+            .filter { it.length >= 6 }
+
+        val contractCandidate = cleanedCandidates.firstOrNull { c ->
+            c.any { it.isLetter() } && c.any { it.isDigit() } && c.length in 8..24
+        }
+
+        assertEquals("CCTSMG26020583", contractCandidate)
+    }
 
     @Test
     fun testStabilityFilterRequiresConsecutiveMatches() {

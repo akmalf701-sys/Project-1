@@ -30,41 +30,19 @@ object ExcelExporter {
     }
 
     /**
-     * Generate CSV content with UTF-8 BOM so Microsoft Excel recognizes UTF-8 encoding properly.
+     * Generate CSV content with UTF-8 BOM containing only the contract number / barcode column.
      */
     fun generateCsv(items: List<BarcodeEntity>, delimiter: String = ";"): String {
         val sb = StringBuilder()
         // UTF-8 BOM
         sb.append('\uFEFF')
 
-        // Header
-        val headers = listOf(
-            "No",
-            "Kode Barcode",
-            "Format Barcode",
-            "Nama / Deskripsi",
-            "Jumlah (Qty)",
-            "Tanggal Scan",
-            "Waktu Scan",
-            "Catatan"
-        )
-        sb.append(headers.joinToString(delimiter) { escapeCsv(it, delimiter) }).append("\r\n")
+        // Single Column Header: Nomor Kontrak
+        sb.append(escapeCsv("Nomor Kontrak", delimiter)).append("\r\n")
 
-        // Rows
-        items.forEachIndexed { index, item ->
-            val date = dateFormatter.format(Date(item.timestamp))
-            val time = timeFormatter.format(Date(item.timestamp))
-            val row = listOf(
-                (index + 1).toString(),
-                item.code,
-                item.format,
-                item.title,
-                item.quantity.toString(),
-                date,
-                time,
-                item.note
-            )
-            sb.append(row.joinToString(delimiter) { escapeCsv(it, delimiter) }).append("\r\n")
+        // Rows: Only product code / contract number
+        items.forEach { item ->
+            sb.append(escapeCsv(item.code, delimiter)).append("\r\n")
         }
 
         return sb.toString()
@@ -84,7 +62,8 @@ object ExcelExporter {
 
     /**
      * Generates native Microsoft Excel XML Spreadsheet format (.xls)
-     * Opens directly in Microsoft Excel, WPS Office, and Google Sheets with formatted headers and column widths.
+     * Opens directly in Microsoft Excel, WPS Office, and Google Sheets.
+     * Contains only the 'Nomor Kontrak' column as requested.
      */
     fun generateExcelXml(items: List<BarcodeEntity>): String {
         val sb = StringBuilder()
@@ -101,7 +80,7 @@ object ExcelExporter {
         sb.append("  <Style ss:ID=\"Default\" ss:Name=\"Normal\">\n")
         sb.append("   <Alignment ss:Vertical=\"Center\"/>\n")
         sb.append("   <Borders/>\n")
-        sb.append("   <Font ss:FontName=\"Segoe UI\" ss:Size=\"10\" ss:Color=\"#000000\"/>\n")
+        sb.append("   <Font ss:FontName=\"Segoe UI\" ss:Size=\"11\" ss:Color=\"#000000\"/>\n")
         sb.append("  </Style>\n")
 
         // Header style (Excel emerald green with bold white text)
@@ -114,17 +93,7 @@ object ExcelExporter {
         sb.append("   <Interior ss:Color=\"#0F766E\" ss:Pattern=\"Solid\"/>\n")
         sb.append("  </Style>\n")
 
-        // Text centered
-        sb.append("  <Style ss:ID=\"CenteredText\">\n")
-        sb.append("   <Alignment ss:Horizontal=\"Center\" ss:Vertical=\"Center\"/>\n")
-        sb.append("  </Style>\n")
-
-        // Number right aligned
-        sb.append("  <Style ss:ID=\"NumberStyle\">\n")
-        sb.append("   <Alignment ss:Horizontal=\"Right\" ss:Vertical=\"Center\"/>\n")
-        sb.append("  </Style>\n")
-
-        // Barcode text style (monospace / preserved leading zeros)
+        // Barcode / Contract number text style (left aligned, preserved leading zeros)
         sb.append("  <Style ss:ID=\"BarcodeStyle\">\n")
         sb.append("   <Alignment ss:Horizontal=\"Left\" ss:Vertical=\"Center\"/>\n")
         sb.append("   <NumberFormat ss:Format=\"@\"/>\n")
@@ -133,54 +102,21 @@ object ExcelExporter {
         sb.append(" </Styles>\n")
 
         // Worksheet
-        sb.append(" <Worksheet ss:Name=\"Daftar Barcode\">\n")
-        sb.append("  <Table ss:DefaultRowHeight=\"20\">\n")
+        sb.append(" <Worksheet ss:Name=\"Nomor Kontrak\">\n")
+        sb.append("  <Table ss:DefaultRowHeight=\"22\">\n")
 
-        // Column widths
-        sb.append("   <Column ss:Width=\"40\"/>\n")   // No
-        sb.append("   <Column ss:Width=\"140\"/>\n")  // Barcode
-        sb.append("   <Column ss:Width=\"90\"/>\n")   // Format
-        sb.append("   <Column ss:Width=\"160\"/>\n")  // Nama
-        sb.append("   <Column ss:Width=\"60\"/>\n")   // Qty
-        sb.append("   <Column ss:Width=\"90\"/>\n")   // Tanggal
-        sb.append("   <Column ss:Width=\"80\"/>\n")   // Waktu
-        sb.append("   <Column ss:Width=\"150\"/>\n")  // Catatan
+        // Single Column Width
+        sb.append("   <Column ss:Width=\"220\"/>\n")
 
         // Header Row
         sb.append("   <Row ss:Height=\"26\" ss:StyleID=\"HeaderStyle\">\n")
-        listOf("No", "Kode Barcode", "Format", "Nama / Deskripsi", "Qty", "Tanggal", "Waktu", "Catatan").forEach { header ->
-            sb.append("    <Cell><Data ss:Type=\"String\">${escapeXml(header)}</Data></Cell>\n")
-        }
+        sb.append("    <Cell><Data ss:Type=\"String\">Nomor Kontrak</Data></Cell>\n")
         sb.append("   </Row>\n")
 
-        // Data Rows
-        items.forEachIndexed { index, item ->
-            val date = dateFormatter.format(Date(item.timestamp))
-            val time = timeFormatter.format(Date(item.timestamp))
+        // Data Rows (Only contract / barcode numbers)
+        items.forEach { item ->
             sb.append("   <Row>\n")
-            sb.append("    <Cell ss:StyleID=\"CenteredText\"><Data ss:Type=\"Number\">${index + 1}</Data></Cell>\n")
             sb.append("    <Cell ss:StyleID=\"BarcodeStyle\"><Data ss:Type=\"String\">${escapeXml(item.code)}</Data></Cell>\n")
-            sb.append("    <Cell ss:StyleID=\"CenteredText\"><Data ss:Type=\"String\">${escapeXml(item.format)}</Data></Cell>\n")
-            sb.append("    <Cell><Data ss:Type=\"String\">${escapeXml(item.title)}</Data></Cell>\n")
-            sb.append("    <Cell ss:StyleID=\"NumberStyle\"><Data ss:Type=\"Number\">${item.quantity}</Data></Cell>\n")
-            sb.append("    <Cell ss:StyleID=\"CenteredText\"><Data ss:Type=\"String\">$date</Data></Cell>\n")
-            sb.append("    <Cell ss:StyleID=\"CenteredText\"><Data ss:Type=\"String\">$time</Data></Cell>\n")
-            sb.append("    <Cell><Data ss:Type=\"String\">${escapeXml(item.note)}</Data></Cell>\n")
-            sb.append("   </Row>\n")
-        }
-
-        // Summary Total Row if items not empty
-        if (items.isNotEmpty()) {
-            val totalQty = items.sumOf { it.quantity }
-            sb.append("   <Row ss:Height=\"22\">\n")
-            sb.append("    <Cell ss:StyleID=\"CenteredText\"><Data ss:Type=\"String\">TOTAL</Data></Cell>\n")
-            sb.append("    <Cell><Data ss:Type=\"String\">${items.size} item barcode</Data></Cell>\n")
-            sb.append("    <Cell><Data ss:Type=\"String\"></Data></Cell>\n")
-            sb.append("    <Cell><Data ss:Type=\"String\"></Data></Cell>\n")
-            sb.append("    <Cell ss:StyleID=\"NumberStyle\"><Data ss:Type=\"Number\">$totalQty</Data></Cell>\n")
-            sb.append("    <Cell><Data ss:Type=\"String\"></Data></Cell>\n")
-            sb.append("    <Cell><Data ss:Type=\"String\"></Data></Cell>\n")
-            sb.append("    <Cell><Data ss:Type=\"String\"></Data></Cell>\n")
             sb.append("   </Row>\n")
         }
 

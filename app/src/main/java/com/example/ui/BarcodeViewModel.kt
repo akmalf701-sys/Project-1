@@ -18,6 +18,8 @@ import com.google.mlkit.vision.barcode.BarcodeScannerOptions
 import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.common.InputImage
+import com.google.mlkit.vision.text.TextRecognition
+import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -294,7 +296,7 @@ class BarcodeViewModel(
     }
 
     /**
-     * Scan barcode from gallery photo
+     * Scan barcode from gallery photo with automatic OCR fallback for contract labels
      */
     fun scanBarcodeFromUri(uri: Uri, onResult: (Boolean, String) -> Unit) {
         try {
@@ -305,33 +307,75 @@ class BarcodeViewModel(
             val scanner = BarcodeScanning.getClient(options)
             scanner.process(image)
                 .addOnSuccessListener { barcodes ->
-                    if (barcodes.isNotEmpty()) {
-                        val first = barcodes[0]
-                        val raw = first.rawValue ?: ""
-                        if (raw.isNotBlank()) {
-                            val format = BarcodeAnalyzer.getFormatName(first.format)
-                            val trimmed = raw.trim()
-                            viewModelScope.launch {
-                                val existing = repository.findByCode(trimmed)
-                                if (existing != null && _preventDuplicates.value) {
-                                    playDuplicateBeep()
-                                    triggerHapticFeedback(isError = true)
-                                    _duplicateEvent.emit(trimmed)
-                                    onResult(false, "Barcode $trimmed sudah terdaftar di daftar Excel (Duplikat dicegah).")
-                                } else {
-                                    onBarcodeDetected(raw, format)
-                                    onResult(true, "Berhasil scan: $raw ($format)")
-                                }
+                    val first = barcodes.firstOrNull { !it.rawValue.isNullOrBlank() }
+                    if (first != null) {
+                        val raw = first.rawValue!!.trim()
+                        val cleanedCode = BarcodeAnalyzer.cleanBarcodeValue(raw, first.format)
+                        val format = BarcodeAnalyzer.getFormatName(first.format)
+                        viewModelScope.launch {
+                            val existing = repository.findByCode(cleanedCode)
+                            if (existing != null && _preventDuplicates.value) {
+                                playDuplicateBeep()
+                                triggerHapticFeedback(isError = true)
+                                _duplicateEvent.emit(cleanedCode)
+                                onResult(false, "Barcode $cleanedCode sudah terdaftar di daftar Excel (Duplikat dicegah).")
+                            } else {
+                                onBarcodeDetected(cleanedCode, format)
+                                onResult(true, "Berhasil scan barcode: $cleanedCode ($format)")
                             }
-                        } else {
-                            onResult(false, "Barcode terdeteksi tetapi nilainya kosong.")
                         }
                     } else {
-                        onResult(false, "Tidak ada barcode yang terdeteksi di gambar ini.")
+                        // Fallback: Use OCR Text Recognition to read Contract Number text
+                        val textRecognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
+                        textRecognizer.process(image)
+                            .addOnSuccessListener { visionText ->
+                                val candidates = mutableListOf<String>()
+                                for (block in visionText.textBlocks) {
+                                    for (line in block.lines) {
+                                        val words = line.text.trim().split("\\s+".toRegex())
+                                        for (w in words) {
+                                            val clean = w.replace("[^A-Za-z0-9]".toRegex(), "")
+                                            if (clean.length >= 6) {
+                                                candidates.add(clean)
+                                            }
+                                        }
+                                    }
+                                }
+                                val distinct = candidates.distinct()
+                                val contractCandidate = distinct.firstOrNull { c ->
+                                    c.any { it.isLetter() } && c.any { it.isDigit() } && c.length in 8..24
+                                } ?: distinct.firstOrNull { it.length in 8..24 }
+
+                                if (contractCandidate != null) {
+                                    viewModelScope.launch {
+                                        val existing = repository.findByCode(contractCandidate)
+                                        if (existing != null && _preventDuplicates.value) {
+                                            playDuplicateBeep()
+                                            triggerHapticFeedback(isError = true)
+                                            _duplicateEvent.emit(contractCandidate)
+                                            onResult(false, "Nomor Kontrak $contractCandidate sudah terdaftar (Duplikat dicegah).")
+                                        } else {
+                                            onBarcodeDetected(contractCandidate, "NOMOR_KONTRAK")
+                                            onResult(true, "Berhasil mengenali Nomor Kontrak: $contractCandidate")
+                                        }
+                                    }
+                                } else {
+                                    onResult(false, "Barcode tidak terdeteksi di gambar ini.")
+                                }
+                            }
+                            .addOnFailureListener {
+                                onResult(false, "Tidak ada barcode yang terdeteksi di gambar ini.")
+                            }
+                            .addOnCompleteListener {
+                                try { textRecognizer.close() } catch (_: Exception) {}
+                            }
                     }
                 }
                 .addOnFailureListener { e ->
                     onResult(false, "Gagal memproses gambar: ${e.localizedMessage}")
+                }
+                .addOnCompleteListener {
+                    try { scanner.close() } catch (_: Exception) {}
                 }
         } catch (e: Exception) {
             onResult(false, "Error membuka gambar: ${e.localizedMessage}")

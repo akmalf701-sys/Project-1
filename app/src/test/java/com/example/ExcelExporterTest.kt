@@ -23,10 +23,10 @@ class ExcelExporterTest {
         val csv = ExcelExporter.generateCsv(items, delimiter = ";")
         // Check for UTF-8 BOM
         assertTrue(csv.startsWith("\uFEFF"))
-        // Check headers
-        assertTrue(csv.contains("Kode Barcode;Format Barcode;Nama / Deskripsi;Jumlah (Qty)"))
-        // Check content row
-        assertTrue(csv.contains("8991234567890;EAN_13;Indomie Goreng;5"))
+        // Check single column header
+        assertTrue(csv.contains("Nomor Kontrak"))
+        // Check content row contains the code
+        assertTrue(csv.contains("8991234567890"))
     }
 
     @Test
@@ -35,17 +35,16 @@ class ExcelExporterTest {
             BarcodeEntity(
                 id = 1,
                 code = "ABC-99901",
-                format = "CODE_128",
-                title = "Barang Logistik",
-                quantity = 10,
-                note = "Gudang B"
+                format = "CODE_39",
+                title = "",
+                quantity = 1,
+                note = ""
             )
         )
 
         val xml = ExcelExporter.generateExcelXml(items)
         assertTrue(xml.contains("urn:schemas-microsoft-com:office:spreadsheet"))
+        assertTrue(xml.contains("Nomor Kontrak"))
         assertTrue(xml.contains("ABC-99901"))
-        assertTrue(xml.contains("Barang Logistik"))
-        assertTrue(xml.contains("<Data ss:Type=\"Number\">10</Data>"))
     }
 }
