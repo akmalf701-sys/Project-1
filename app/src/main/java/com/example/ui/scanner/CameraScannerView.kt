@@ -135,8 +135,8 @@ fun CameraScannerView(
                 ViewGroup.LayoutParams.MATCH_PARENT
             )
             scaleType = PreviewView.ScaleType.FILL_CENTER
-            // PERFORMANCE (SurfaceView) avoids TextureView OpenGL gralloc buffer leaks & SELinux rate limits
-            implementationMode = PreviewView.ImplementationMode.PERFORMANCE
+            // COMPATIBLE (TextureView) avoids SurfaceView BLASTBufferQueue abandoned errors during Compose recomposition & screen navigation
+            implementationMode = PreviewView.ImplementationMode.COMPATIBLE
         }
     }
 
@@ -302,10 +302,17 @@ fun CameraScannerView(
 
     // Bind and unbind camera lifecycle cleanly
     DisposableEffect(lifecycleOwner, useFrontCamera) {
+        var isDisposed = false
         var cameraProvider: ProcessCameraProvider? = null
         val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
 
         cameraProviderFuture.addListener({
+            if (isDisposed) {
+                try {
+                    cameraProviderFuture.get().unbindAll()
+                } catch (_: Exception) {}
+                return@addListener
+            }
             try {
                 val provider = cameraProviderFuture.get()
                 cameraProvider = provider
@@ -365,6 +372,7 @@ fun CameraScannerView(
         }, ContextCompat.getMainExecutor(context))
 
         onDispose {
+            isDisposed = true
             try {
                 cameraProvider?.unbindAll()
                 currentAnalyzer?.close()
