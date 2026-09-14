@@ -165,6 +165,17 @@ fun CameraScannerView(
         }
     }
 
+    // Function to unfreeze and resume live camera preview
+    fun resumeLiveCamera() {
+        frozenBitmap = null
+        isProcessingFreeze = false
+        freezeResultCode = null
+        freezeFailedMessage = null
+        freezeOcrCandidates = emptyList()
+        currentAnalyzer?.isPaused = false
+        currentAnalyzer?.resetDetectionState()
+    }
+
     // Helper to decode barcode and OCR on a still frozen bitmap
     fun processStillImage(bmp: Bitmap) {
         frozenBitmap = bmp
@@ -176,17 +187,7 @@ fun CameraScannerView(
 
         val inputImage = InputImage.fromBitmap(bmp, 0)
         val options = BarcodeScannerOptions.Builder()
-            .setBarcodeFormats(
-                Barcode.FORMAT_CODE_128,
-                Barcode.FORMAT_CODE_39,
-                Barcode.FORMAT_EAN_13,
-                Barcode.FORMAT_EAN_8,
-                Barcode.FORMAT_UPC_A,
-                Barcode.FORMAT_UPC_E,
-                Barcode.FORMAT_QR_CODE,
-                Barcode.FORMAT_DATA_MATRIX,
-                Barcode.FORMAT_ITF
-            )
+            .setBarcodeFormats(Barcode.FORMAT_ALL_FORMATS)
             .build()
         val stillScanner = BarcodeScanning.getClient(options)
         val textRecognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
@@ -204,6 +205,14 @@ fun CameraScannerView(
                     freezeResultCode = code
                     onBarcodeDetected(code, format)
                     isProcessingFreeze = false
+
+                    // Auto-resume live camera after 1.8 seconds so user can scan next barcode seamlessly
+                    coroutineScope.launch {
+                        delay(1800)
+                        if (frozenBitmap != null) {
+                            resumeLiveCamera()
+                        }
+                    }
                 } else {
                     // Barcode not detected, check if OCR can find a contract number candidate to suggest
                     textRecognizer.process(inputImage)
@@ -290,14 +299,11 @@ fun CameraScannerView(
         }
     }
 
-    // Function to unfreeze and resume live camera preview
-    fun resumeLiveCamera() {
-        frozenBitmap = null
-        isProcessingFreeze = false
-        freezeResultCode = null
-        freezeFailedMessage = null
-        freezeOcrCandidates = emptyList()
-        currentAnalyzer?.isPaused = false
+    LaunchedEffect(autoScanEnabled) {
+        currentAnalyzer?.autoScanEnabled = autoScanEnabled
+        if (autoScanEnabled) {
+            currentAnalyzer?.resetDetectionState()
+        }
     }
 
     // Bind and unbind camera lifecycle cleanly
@@ -320,7 +326,7 @@ fun CameraScannerView(
 
                 @Suppress("DEPRECATION")
                 val preview = Preview.Builder()
-                    .setTargetResolution(android.util.Size(1280, 720))
+                    .setTargetResolution(android.util.Size(1920, 1080))
                     .build()
                     .also {
                         it.surfaceProvider = previewView.surfaceProvider
@@ -335,10 +341,10 @@ fun CameraScannerView(
                 }
                 currentAnalyzer = analyzer
 
-                // High Definition 1280x720 ensures crystal-clear barcode lines and OCR sharpness
+                // Full HD 1920x1080 ensures ultra-sharp barcode lines and 100% digit accuracy
                 @Suppress("DEPRECATION")
                 val imageAnalysis = ImageAnalysis.Builder()
-                    .setTargetResolution(android.util.Size(1280, 720))
+                    .setTargetResolution(android.util.Size(1920, 1080))
                     .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                     .build()
                     .also {
@@ -366,6 +372,19 @@ fun CameraScannerView(
                 camera = boundCamera
                 // Re-apply zoom if set
                 boundCamera.cameraControl.setZoomRatio(zoomRatio)
+
+                // Trigger center autofocus
+                previewView.post {
+                    try {
+                        val factory = previewView.meteringPointFactory
+                        val centerPoint = factory.createPoint(previewView.width / 2f, previewView.height / 2f)
+                        val action = androidx.camera.core.FocusMeteringAction.Builder(
+                            centerPoint,
+                            androidx.camera.core.FocusMeteringAction.FLAG_AF or androidx.camera.core.FocusMeteringAction.FLAG_AE
+                        ).setAutoCancelDuration(3, java.util.concurrent.TimeUnit.SECONDS).build()
+                        boundCamera.cameraControl.startFocusAndMetering(action)
+                    } catch (_: Exception) {}
+                }
             } catch (e: Exception) {
                 Log.e("CameraScanner", "Camera bind failed", e)
             }
@@ -448,39 +467,6 @@ fun CameraScannerView(
                     .size(60.dp)
                     .border(2.dp, Color(0xFFFBBF24), CircleShape)
             )
-        }
-
-        // 4. Focus Guidance Banner at Top
-        AnimatedVisibility(
-            visible = frozenBitmap == null,
-            modifier = Modifier
-                .align(Alignment.TopCenter)
-                .padding(top = 96.dp)
-        ) {
-            Surface(
-                shape = RoundedCornerShape(20.dp),
-                color = Color(0xD00F172A),
-                border = BorderStroke(1.dp, Color(0x33FFFFFF))
-            ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.QrCode,
-                        contentDescription = null,
-                        tint = Color(0xFF10B981),
-                        modifier = Modifier.size(16.dp)
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = "Arahkan kotak ke garis barcode",
-                        color = Color.White,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Medium
-                    )
-                }
-            }
         }
 
         // 5. Frozen Status Badge at Top

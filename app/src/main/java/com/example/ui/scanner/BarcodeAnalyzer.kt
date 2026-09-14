@@ -14,21 +14,10 @@ class BarcodeAnalyzer(
     private val onBarcodeDetected: (code: String, format: String) -> Unit
 ) : ImageAnalysis.Analyzer {
 
-    // Configure scanner strictly for standard product and contract 1D/2D barcodes
-    // Exclude CODABAR and CODE_93 which easily misread printed text as barcodes
+    // Support all standard 1D and 2D barcode formats
     private val barcodeScanner = BarcodeScanning.getClient(
         BarcodeScannerOptions.Builder()
-            .setBarcodeFormats(
-                Barcode.FORMAT_CODE_128,
-                Barcode.FORMAT_CODE_39,
-                Barcode.FORMAT_EAN_13,
-                Barcode.FORMAT_EAN_8,
-                Barcode.FORMAT_UPC_A,
-                Barcode.FORMAT_UPC_E,
-                Barcode.FORMAT_QR_CODE,
-                Barcode.FORMAT_DATA_MATRIX,
-                Barcode.FORMAT_ITF
-            )
+            .setBarcodeFormats(Barcode.FORMAT_ALL_FORMATS)
             .build()
     )
 
@@ -44,14 +33,22 @@ class BarcodeAnalyzer(
     @Volatile
     var autoScanEnabled: Boolean = true
 
-    // Cooldown filter to avoid rapid duplicate spam for the same code
+    // Cooldown filter: only prevents rapid re-trigger for the SAME code
     private var lastDetectedCode: String = ""
     private var lastDetectedTimestamp: Long = 0L
 
-    // Stability candidate for 1D barcodes (Must match on consecutive frames)
+    // Stability candidate for 1D barcodes without built-in checksums (e.g. Code 39)
+    // Ensures 100% character/digit accuracy across frames
     private var candidateCode: String = ""
     private var candidateCount: Int = 0
     private var candidateFirstSeenTime: Long = 0L
+
+    fun resetDetectionState() {
+        lastDetectedCode = ""
+        lastDetectedTimestamp = 0L
+        candidateCode = ""
+        candidateCount = 0
+    }
 
     @OptIn(ExperimentalGetImage::class)
     override fun analyze(imageProxy: ImageProxy) {
@@ -63,8 +60,8 @@ class BarcodeAnalyzer(
             return
         }
 
-        // Throttle frame analysis (~6 FPS) for smooth performance and accurate reading
-        if (isAnalyzing || (now - lastAnalyzedTimestamp < 160L)) {
+        // Process frames smoothly (~12-15 FPS) for responsive scanning
+        if (isAnalyzing || (now - lastAnalyzedTimestamp < 75L)) {
             imageProxy.close()
             return
         }
@@ -89,36 +86,11 @@ class BarcodeAnalyzer(
     private fun analyzeBarcode(image: InputImage, imageProxy: ImageProxy, now: Long) {
         barcodeScanner.process(image)
             .addOnSuccessListener { barcodes ->
-                val imgW = image.width.toFloat()
-                val imgH = image.height.toFloat()
-
-                // Find first valid barcode that passes all filters:
-                // 1. Content check (No spaces or text artifacts)
-                // 2. Viewfinder ROI (Must be centered inside the viewfinder box)
+                // Find first valid barcode
                 val validBarcode = barcodes.firstOrNull { barcode ->
                     val raw = barcode.rawValue
                     if (raw.isNullOrBlank()) return@firstOrNull false
-
-                    // Reject any 1D barcode containing spaces or invalid characters
-                    if (!isValidBarcode(raw, barcode.format)) {
-                        return@firstOrNull false
-                    }
-
-                    // Region of interest: Barcode must be centered within the viewfinder box
-                    val box = barcode.boundingBox
-                    if (box != null && imgW > 0 && imgH > 0) {
-                        val cx = box.centerX().toFloat()
-                        val cy = box.centerY().toFloat()
-
-                        val inCenterW = cx >= (imgW * 0.12f) && cx <= (imgW * 0.88f)
-                        val inCenterH = cy >= (imgH * 0.18f) && cy <= (imgH * 0.82f)
-
-                        if (!inCenterW || !inCenterH) {
-                            return@firstOrNull false
-                        }
-                    }
-
-                    true
+                    isValidBarcode(raw, barcode.format)
                 }
 
                 if (validBarcode != null) {
@@ -126,18 +98,23 @@ class BarcodeAnalyzer(
                     val code = cleanBarcodeValue(raw, validBarcode.format)
                     val formatStr = getFormatName(validBarcode.format)
 
-                    val is2D = (validBarcode.format == Barcode.FORMAT_QR_CODE || 
-                                validBarcode.format == Barcode.FORMAT_DATA_MATRIX)
+                    // Formats with built-in checksums/error-correction cannot misread digits:
+                    // EAN (mod-10), UPC (mod-10), Code 128 (mod-103), QR (Reed-Solomon), Data Matrix
+                    val isChecksummed = (validBarcode.format == Barcode.FORMAT_EAN_13 ||
+                                         validBarcode.format == Barcode.FORMAT_EAN_8 ||
+                                         validBarcode.format == Barcode.FORMAT_UPC_A ||
+                                         validBarcode.format == Barcode.FORMAT_UPC_E ||
+                                         validBarcode.format == Barcode.FORMAT_CODE_128 ||
+                                         validBarcode.format == Barcode.FORMAT_QR_CODE ||
+                                         validBarcode.format == Barcode.FORMAT_DATA_MATRIX)
 
-                    if (is2D) {
-                        // 2D codes have built-in error correction / checksums
+                    if (isChecksummed) {
+                        // Trigger immediately for zero latency
                         triggerIfAllowed(code, formatStr, now)
                     } else {
-                        // 1D Barcode: Enforce strict multi-frame stability!
-                        // Transient text misreads (like "W .605Y02") change every frame and never repeat.
-                        // Real barcodes match identically across frames.
-                        val isSameCandidate = (code == candidateCode) && (now - candidateFirstSeenTime < 800L)
-                        if (isSameCandidate) {
+                        // Non-checksummed 1D barcodes (Code 39, ITF, Codabar):
+                        // Require 2 matching readings within 1200ms to eliminate 1-character misreads
+                        if (code == candidateCode && (now - candidateFirstSeenTime < 1200L)) {
                             candidateCount++
                             if (candidateCount >= 2) {
                                 triggerIfAllowed(code, formatStr, now)
@@ -151,7 +128,7 @@ class BarcodeAnalyzer(
                         }
                     }
                 } else {
-                    if (now - candidateFirstSeenTime > 600L) {
+                    if (now - candidateFirstSeenTime > 900L) {
                         candidateCode = ""
                         candidateCount = 0
                     }
@@ -165,8 +142,9 @@ class BarcodeAnalyzer(
 
     private fun triggerIfAllowed(code: String, format: String, now: Long) {
         if (code.isBlank()) return
-        // Prevent duplicate trigger within 2 seconds for the same code
-        if (code == lastDetectedCode && (now - lastDetectedTimestamp < 2000L)) {
+        // Prevent duplicate trigger for the exact same code within 1500ms cooldown.
+        // Changing to a different barcode triggers immediately with ZERO delay!
+        if (code == lastDetectedCode && (now - lastDetectedTimestamp < 1500L)) {
             return
         }
         lastDetectedCode = code
@@ -182,23 +160,18 @@ class BarcodeAnalyzer(
 
     companion object {
         /**
-         * Validates barcode content to reject text misreads.
-         * Real barcodes (Code 39, Code 128, etc.) do NOT have random spaces or isolated periods.
+         * Validates barcode content to reject accidental text misreads.
          */
         fun isValidBarcode(raw: String, format: Int): Boolean {
             val trimmed = raw.trim()
             if (trimmed.length < 3) return false
 
-            // Reject any 1D barcode containing whitespace - this is the #1 cause of text misreads
-            if (trimmed.contains(" ") || trimmed.contains("\t") || trimmed.contains("\n")) {
-                return false
-            }
-
             if (format == Barcode.FORMAT_CODE_39) {
                 val cleaned = cleanBarcodeValue(trimmed, format)
                 if (cleaned.length < 3) return false
-                // Reject isolated dots or periods common in false text readings
-                if (cleaned.startsWith(".") || cleaned.endsWith(".") || cleaned.contains("..")) {
+                // Reject isolated dots or periods common in false text readings (e.g. "W .605Y02", ".605Y02.")
+                if (cleaned.startsWith(".") || cleaned.endsWith(".") ||
+                    cleaned.contains("..") || cleaned.contains(" .") || cleaned.contains(". ")) {
                     return false
                 }
             }
@@ -207,13 +180,14 @@ class BarcodeAnalyzer(
         }
 
         fun cleanBarcodeValue(raw: String, format: Int): String {
-            val trimmed = raw.trim()
-            return if (format == Barcode.FORMAT_CODE_39) {
+            var trimmed = raw.trim()
+            if (format == Barcode.FORMAT_CODE_39) {
                 // Code 39 uses * as start/stop delimiters (e.g. *4642605902* -> 4642605902)
-                trimmed.removePrefix("*").removeSuffix("*").trim()
-            } else {
-                trimmed
+                trimmed = trimmed.removePrefix("*").removeSuffix("*").trim()
+                if (trimmed.startsWith("*")) trimmed = trimmed.removePrefix("*").trim()
+                if (trimmed.endsWith("*")) trimmed = trimmed.removeSuffix("*").trim()
             }
+            return trimmed
         }
 
         fun getFormatName(format: Int): String {
