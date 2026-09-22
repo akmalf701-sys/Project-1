@@ -17,8 +17,10 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.QrCode
 import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -44,6 +46,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.example.data.BarcodeEntity
 
 @Composable
@@ -51,21 +54,41 @@ fun EditItemDialog(
     item: BarcodeEntity,
     onDismiss: () -> Unit,
     onSave: (BarcodeEntity) -> Unit,
-    onDelete: (BarcodeEntity) -> Unit
+    onDelete: (BarcodeEntity) -> Unit,
+    preventDuplicates: Boolean = false,
+    existingCodes: Set<String> = emptySet()
 ) {
     val context = LocalContext.current
+    var codeText by remember { mutableStateOf(item.code) }
     var title by remember { mutableStateOf(item.title) }
     var note by remember { mutableStateOf(item.note) }
     var quantityText by remember { mutableStateOf(item.quantity.toString()) }
 
+    val trimmedCode = codeText.trim()
+    val isDuplicate = remember(trimmedCode, existingCodes, preventDuplicates) {
+        preventDuplicates && trimmedCode.isNotEmpty() && trimmedCode != item.code && existingCodes.contains(trimmedCode)
+    }
+    val isValidCode = trimmedCode.isNotEmpty() && !isDuplicate
+
     AlertDialog(
         onDismissRequest = onDismiss,
         title = {
-            Text(
-                text = "Detail & Edit Barcode",
-                style = MaterialTheme.typography.titleLarge,
-                fontWeight = FontWeight.Bold
-            )
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.QrCode,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(26.dp)
+                )
+                Text(
+                    text = "Edit Data Barcode",
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold
+                )
+            }
         },
         text = {
             Column(
@@ -74,50 +97,84 @@ fun EditItemDialog(
                     .padding(vertical = 4.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                // Barcode code display with copy
-                Surface(
-                    shape = RoundedCornerShape(8.dp),
-                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(12.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = "Format: ${item.format}",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.primary,
-                                fontWeight = FontWeight.Bold
-                            )
-                            Text(
-                                text = item.code,
-                                style = MaterialTheme.typography.bodyMedium,
-                                fontFamily = FontFamily.Monospace,
-                                fontWeight = FontWeight.SemiBold,
-                                color = MaterialTheme.colorScheme.onSurface
-                            )
-                        }
-                        IconButton(
-                            onClick = {
-                                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                                val clip = ClipData.newPlainText("Barcode", item.code)
-                                clipboard.setPrimaryClip(clip)
-                                Toast.makeText(context, "Kode barcode disalin!", Toast.LENGTH_SHORT).show()
+                // Editable Barcode Number input (User requested: nomor bisa diedit kalau salah baca)
+                OutlinedTextField(
+                    value = codeText,
+                    onValueChange = { codeText = it },
+                    label = { Text("Nomor / Kode Barcode") },
+                    placeholder = { Text("Ketik atau perbaiki nomor barcode...") },
+                    leadingIcon = {
+                        Icon(
+                            imageVector = Icons.Default.QrCode,
+                            contentDescription = null,
+                            tint = if (isDuplicate) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
+                        )
+                    },
+                    trailingIcon = {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            if (codeText.isNotEmpty()) {
+                                IconButton(
+                                    onClick = { codeText = "" },
+                                    modifier = Modifier.size(32.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Clear,
+                                        contentDescription = "Hapus teks",
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                }
                             }
+                            IconButton(
+                                onClick = {
+                                    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                                    val clip = ClipData.newPlainText("Barcode", codeText)
+                                    clipboard.setPrimaryClip(clip)
+                                    Toast.makeText(context, "Nomor barcode disalin!", Toast.LENGTH_SHORT).show()
+                                },
+                                modifier = Modifier.size(32.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.ContentCopy,
+                                    contentDescription = "Salin Kode",
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            }
+                        }
+                    },
+                    supportingText = {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
                         ) {
-                            Icon(
-                                imageVector = Icons.Default.ContentCopy,
-                                contentDescription = "Salin Kode",
-                                modifier = Modifier.size(20.dp)
+                            Text(
+                                text = if (isDuplicate) {
+                                    "⚠️ Kode ini sudah ada di daftar Excel!"
+                                } else if (codeText.isBlank()) {
+                                    "⚠️ Nomor tidak boleh kosong"
+                                } else {
+                                    "Format: ${item.format} • Edit jika salah baca"
+                                },
+                                color = if (isDuplicate || codeText.isBlank()) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                                fontSize = 11.sp
+                            )
+                            Text(
+                                text = "${codeText.length} digit",
+                                fontWeight = FontWeight.Bold,
+                                color = if (codeText.length == 10) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                fontSize = 11.sp
                             )
                         }
-                    }
-                }
+                    },
+                    isError = codeText.isBlank() || isDuplicate,
+                    textStyle = MaterialTheme.typography.bodyLarge.copy(
+                        fontFamily = FontFamily.Monospace,
+                        fontWeight = FontWeight.Bold
+                    ),
+                    singleLine = true,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("edit_code_input")
+                )
 
                 // Name / Title input
                 OutlinedTextField(
@@ -198,12 +255,14 @@ fun EditItemDialog(
                     val finalQty = quantityText.toIntOrNull()?.coerceAtLeast(1) ?: 1
                     onSave(
                         item.copy(
+                            code = trimmedCode,
                             title = title.trim(),
                             quantity = finalQty,
                             note = note.trim()
                         )
                     )
                 },
+                enabled = isValidCode,
                 modifier = Modifier.testTag("save_edit_button")
             ) {
                 Text("Simpan")

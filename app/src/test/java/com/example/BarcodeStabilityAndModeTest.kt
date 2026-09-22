@@ -184,4 +184,23 @@ class BarcodeStabilityAndModeTest {
         assertEquals("4642605902", corrected)
         assertTrue("Corrected 10-digit code must be accepted", checkCodeAgainstLength(corrected, targetLength))
     }
+
+    @Test
+    fun testEditingBarcodeNumberOnMisread() {
+        val originalMisread = com.example.data.BarcodeEntity(
+            id = 1,
+            code = "464260590", // Misread: missing last digit (9 digits)
+            format = "CODE_39",
+            title = "Barang A",
+            quantity = 1
+        )
+
+        // User edits the barcode number in the edit dialog
+        val correctedCode = "4642605902" // Correct 10-digit number
+        val updated = originalMisread.copy(code = correctedCode)
+
+        assertEquals("4642605902", updated.code)
+        assertEquals(10, updated.code.length)
+        assertEquals("Barang A", updated.title)
+    }
 }

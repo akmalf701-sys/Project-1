@@ -13,6 +13,7 @@ import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -31,6 +32,7 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -407,19 +409,24 @@ fun BarcodeScannerApp(viewModel: BarcodeViewModel) {
     }
 
     itemToEdit?.let { item ->
+        val existingOtherCodes = remember(allItems, item) {
+            allItems.filter { it.id != item.id }.map { it.code }.toSet()
+        }
         EditItemDialog(
             item = item,
             onDismiss = { itemToEdit = null },
             onSave = { updated ->
                 viewModel.updateItem(updated)
                 itemToEdit = null
-                Toast.makeText(context, "Perubahan disimpan!", Toast.LENGTH_SHORT).show()
+                Toast.makeText(context, "Nomor & data barcode berhasil diperbarui!", Toast.LENGTH_SHORT).show()
             },
             onDelete = { toDelete ->
                 viewModel.deleteItem(toDelete)
                 itemToEdit = null
                 Toast.makeText(context, "Item dihapus", Toast.LENGTH_SHORT).show()
-            }
+            },
+            preventDuplicates = preventDuplicates,
+            existingCodes = existingOtherCodes
         )
     }
 
@@ -699,7 +706,9 @@ fun ScannerTabContent(
             modifier = Modifier
                 .align(Alignment.TopCenter)
                 .statusBarsPadding()
-                .padding(top = 66.dp),
+                .padding(top = 66.dp)
+                .horizontalScroll(rememberScrollState())
+                .padding(horizontal = 12.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
@@ -725,7 +734,9 @@ fun ScannerTabContent(
                         text = if (preventDuplicates) "🛡️ Anti-Duplikat ON" else "⚠️ Duplikat Diizinkan",
                         color = Color.White,
                         fontSize = 11.sp,
-                        fontWeight = FontWeight.SemiBold
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        softWrap = false
                     )
                 }
             }
@@ -752,7 +763,9 @@ fun ScannerTabContent(
                         text = if (soundEnabled) "🔊 Suara Tut ON" else "🔇 Tut Mute",
                         color = Color.White,
                         fontSize = 11.sp,
-                        fontWeight = FontWeight.SemiBold
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        softWrap = false
                     )
                 }
             }
@@ -780,7 +793,9 @@ fun ScannerTabContent(
                         text = if (targetDigitLength == 10) "🎯 Kunci 10 Angka" else if (targetDigitLength != null) "🎯 Kunci $targetDigitLength Angka" else "🎯 Kunci: Bebas",
                         color = Color.White,
                         fontSize = 11.sp,
-                        fontWeight = FontWeight.SemiBold
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        softWrap = false
                     )
                 }
             }
@@ -1210,12 +1225,14 @@ fun DataListTabContent(
             }
         }
 
-        // Mode Settings Pills (Anti-Duplikat & Suara Tut)
+        // Mode Settings Pills (Anti-Duplikat & Suara Tut & Kunci Digit)
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 2.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                .horizontalScroll(rememberScrollState())
+                .padding(horizontal = 16.dp, vertical = 4.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically
         ) {
             Surface(
                 shape = RoundedCornerShape(8.dp),
@@ -1239,6 +1256,8 @@ fun DataListTabContent(
                         text = if (preventDuplicates) "Anti-Duplikat: AKTIF" else "Anti-Duplikat: NONAKTIF",
                         fontSize = 11.sp,
                         fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        softWrap = false,
                         color = if (preventDuplicates) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onErrorContainer
                     )
                 }
@@ -1266,6 +1285,8 @@ fun DataListTabContent(
                         text = if (soundEnabled) "Suara Tut: ON" else "Suara Tut: MUTE",
                         fontSize = 11.sp,
                         fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        softWrap = false,
                         color = if (soundEnabled) MaterialTheme.colorScheme.onSecondaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
@@ -1294,6 +1315,8 @@ fun DataListTabContent(
                         text = if (targetDigitLength == 10) "🎯 Tepat 10 Digit: ON" else if (targetDigitLength != null) "🎯 Tepat $targetDigitLength Digit" else "🎯 Kunci: Bebas",
                         fontSize = 11.sp,
                         fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        softWrap = false,
                         color = if (targetDigitLength != null) MaterialTheme.colorScheme.onTertiaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
