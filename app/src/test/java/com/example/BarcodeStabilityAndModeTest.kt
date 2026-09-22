@@ -147,4 +147,41 @@ class BarcodeStabilityAndModeTest {
         toggle()
         assertTrue(isContinuous)
     }
+
+    @Test
+    fun testExact10DigitsConstraintRejectsShortOrExtraDigits() {
+        val targetLength = 10
+
+        fun checkCodeAgainstLength(code: String, target: Int?): Boolean {
+            if (target == null) return true
+            val digitsOnly = code.filter { it.isDigit() }
+            return digitsOnly.length == target
+        }
+
+        // Less than 10 digits (kekurangan angka) -> MUST BE REJECTED
+        assertFalse("9 digits must be rejected", checkCodeAgainstLength("123456789", targetLength))
+        assertFalse("8 digits must be rejected", checkCodeAgainstLength("46426059", targetLength))
+        assertFalse("5 digits must be rejected", checkCodeAgainstLength("12345", targetLength))
+
+        // More than 10 digits (kelebihan angka) -> MUST BE REJECTED
+        assertFalse("11 digits must be rejected", checkCodeAgainstLength("12345678901", targetLength))
+        assertFalse("12 digits must be rejected", checkCodeAgainstLength("123456789012", targetLength))
+        assertFalse("13 digits EAN-13 must be rejected", checkCodeAgainstLength("8991234567890", targetLength))
+
+        // Exactly 10 digits -> ACCEPTED
+        assertTrue("Exact 10 digits must be accepted", checkCodeAgainstLength("4642605902", targetLength))
+        assertTrue("Exact 10 digits must be accepted", checkCodeAgainstLength("1234567890", targetLength))
+        assertTrue("Exact 10 digits must be accepted", checkCodeAgainstLength("4762604839", targetLength))
+
+        // Code 39 with asterisks: cleaned to 10 digits
+        val rawCode39 = "*4642605902*"
+        val cleaned = BarcodeAnalyzer.cleanBarcodeValue(rawCode39, Barcode.FORMAT_CODE_39)
+        assertTrue("Cleaned Code 39 with 10 digits must be accepted", checkCodeAgainstLength(cleaned, targetLength))
+
+        // Code with OCR optical letter error (e.g. 'O' for '0'): auto-corrected to 10 digits
+        val ocrMisread = "46426O5902"
+        val corrected = BarcodeAnalyzer.autoCorrectNearNumericCode(ocrMisread)
+        assertEquals("4642605902", corrected)
+        assertTrue("Corrected 10-digit code must be accepted", checkCodeAgainstLength(corrected, targetLength))
+    }
 }

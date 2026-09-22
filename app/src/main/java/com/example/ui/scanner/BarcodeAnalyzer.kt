@@ -48,6 +48,11 @@ class BarcodeAnalyzer(
     @Volatile
     var numericOnlyMode: Boolean = false
 
+    // When set, strictly enforce exact digit length (e.g. 10 for exactly 10 digits)
+    // Prevents incomplete reads (e.g. 9 digits) or extra reads (e.g. 11+ digits)
+    @Volatile
+    var targetDigitLength: Int? = null
+
     // Cooldown filter: only prevents rapid re-trigger for the SAME code
     private var lastDetectedCode: String = ""
     private var lastDetectedTimestamp: Long = 0L
@@ -108,9 +113,16 @@ class BarcodeAnalyzer(
                 }
 
                 // Sorting strategy:
-                // 1. If numericOnlyMode is ON, only allow barcodes that resolve to pure digits.
-                // 2. Prioritize barcodes that resolve to pure numbers over strings containing letters.
-                val chosenBarcode = if (numericOnlyMode) {
+                // 1. If targetDigitLength is set (e.g. 10 digits), strictly require exact digit length and all digits.
+                // 2. If numericOnlyMode is ON, only allow barcodes that resolve to pure digits.
+                // 3. Prioritize barcodes that resolve to pure numbers over strings containing letters.
+                val targetLen = targetDigitLength
+                val chosenBarcode = if (targetLen != null) {
+                    validList.firstOrNull { b ->
+                        val code = cleanBarcodeValue(b.rawValue ?: "", b.format)
+                        code.length == targetLen && code.all { it.isDigit() }
+                    }
+                } else if (numericOnlyMode) {
                     validList.firstOrNull { b ->
                         val code = cleanBarcodeValue(b.rawValue ?: "", b.format)
                         code.isNotEmpty() && code.all { it.isDigit() }

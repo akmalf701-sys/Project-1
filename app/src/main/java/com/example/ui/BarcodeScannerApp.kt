@@ -43,6 +43,7 @@ import androidx.compose.material.icons.filled.FlipCameraAndroid
 import androidx.compose.material.icons.filled.FormatListNumbered
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Keyboard
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.TableChart
@@ -98,6 +99,7 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import com.example.data.BarcodeEntity
 import com.example.ui.components.BarcodeItemCard
+import com.example.ui.dialogs.DigitLengthSelectorDialog
 import com.example.ui.dialogs.EditItemDialog
 import com.example.ui.dialogs.ExportBottomSheet
 import com.example.ui.dialogs.ManualInputDialog
@@ -118,6 +120,7 @@ fun BarcodeScannerApp(viewModel: BarcodeViewModel) {
     // Dialog & Sheet states
     var showExportSheet by remember { mutableStateOf(false) }
     var showManualInputDialog by remember { mutableStateOf(false) }
+    var showDigitLengthSelector by remember { mutableStateOf(false) }
     var itemToEdit by remember { mutableStateOf<BarcodeEntity?>(null) }
     var showClearAllConfirm by remember { mutableStateOf(false) }
 
@@ -125,6 +128,8 @@ fun BarcodeScannerApp(viewModel: BarcodeViewModel) {
     var recentScannedItem by remember { mutableStateOf<BarcodeEntity?>(null) }
     // Duplicate rejection banner
     var duplicateScannedCode by remember { mutableStateOf<String?>(null) }
+    // Length mismatch rejection banner (detectedCode, expectedLength)
+    var lengthMismatchCode by remember { mutableStateOf<Pair<String, Int>?>(null) }
 
     // Permission state
     var hasCameraPermission by remember {
@@ -184,6 +189,19 @@ fun BarcodeScannerApp(viewModel: BarcodeViewModel) {
         }
     }
 
+    // Observe length mismatch rejection events (e.g. not 10 digits) to show warning banner
+    LaunchedEffect(Unit) {
+        viewModel.lengthMismatchEvent.collectLatest { pair ->
+            recentScannedItem = null
+            duplicateScannedCode = null
+            lengthMismatchCode = pair
+            delay(4000)
+            if (lengthMismatchCode == pair) {
+                lengthMismatchCode = null
+            }
+        }
+    }
+
     val allItems by viewModel.allItems.collectAsState()
     val filteredItems by viewModel.filteredItems.collectAsState()
     val searchQuery by viewModel.searchQuery.collectAsState()
@@ -194,6 +212,7 @@ fun BarcodeScannerApp(viewModel: BarcodeViewModel) {
     val soundEnabled by viewModel.soundEnabled.collectAsState()
     val preventDuplicates by viewModel.preventDuplicates.collectAsState()
     val numericOnlyMode by viewModel.numericOnlyMode.collectAsState()
+    val targetDigitLength by viewModel.targetDigitLength.collectAsState()
 
     Scaffold(
         snackbarHost = { SnackbarHost(snackbarHostState) },
@@ -318,6 +337,11 @@ fun BarcodeScannerApp(viewModel: BarcodeViewModel) {
                         recentItem = recentScannedItem,
                         duplicateCode = duplicateScannedCode,
                         onDismissDuplicate = { duplicateScannedCode = null },
+                        lengthMismatchCode = lengthMismatchCode,
+                        onDismissLengthMismatch = { lengthMismatchCode = null },
+                        targetDigitLength = targetDigitLength,
+                        onToggleExact10Digits = { viewModel.toggleExact10DigitsMode() },
+                        onOpenDigitLengthSelector = { showDigitLengthSelector = true },
                         onEditRecentItem = { item ->
                             itemToEdit = item
                         }
@@ -335,6 +359,8 @@ fun BarcodeScannerApp(viewModel: BarcodeViewModel) {
                         onTogglePreventDuplicates = { viewModel.togglePreventDuplicates() },
                         soundEnabled = soundEnabled,
                         onToggleSound = { viewModel.toggleSound() },
+                        targetDigitLength = targetDigitLength,
+                        onOpenDigitLengthSelector = { showDigitLengthSelector = true },
                         onEditItem = { item -> itemToEdit = item },
                         onDeleteItem = { item -> viewModel.deleteItem(item) },
                         onQuantityChange = { id, newQty -> viewModel.updateQuantity(id, newQty) },
@@ -349,6 +375,16 @@ fun BarcodeScannerApp(viewModel: BarcodeViewModel) {
     }
 
     // Dialogs
+    if (showDigitLengthSelector) {
+        DigitLengthSelectorDialog(
+            currentLength = targetDigitLength,
+            onDismiss = { showDigitLengthSelector = false },
+            onSelectLength = { newLength ->
+                viewModel.setTargetDigitLength(newLength)
+            }
+        )
+    }
+
     if (showExportSheet) {
         ExportBottomSheet(
             items = allItems,
@@ -430,6 +466,9 @@ fun ScannerTabContent(
     onTogglePreventDuplicates: () -> Unit,
     numericOnlyMode: Boolean = false,
     onToggleNumericOnlyMode: () -> Unit = {},
+    targetDigitLength: Int? = null,
+    onToggleExact10Digits: () -> Unit = {},
+    onOpenDigitLengthSelector: () -> Unit = {},
     autoScanEnabled: Boolean = true,
     onToggleAutoScan: () -> Unit = {},
     onPickPhoto: () -> Unit,
@@ -440,6 +479,8 @@ fun ScannerTabContent(
     recentItem: BarcodeEntity?,
     duplicateCode: String?,
     onDismissDuplicate: () -> Unit,
+    lengthMismatchCode: Pair<String, Int>? = null,
+    onDismissLengthMismatch: () -> Unit = {},
     onEditRecentItem: (BarcodeEntity) -> Unit
 ) {
     Box(modifier = Modifier.fillMaxSize()) {
@@ -451,7 +492,10 @@ fun ScannerTabContent(
                 useFrontCamera = useFrontCamera,
                 autoScanEnabled = autoScanEnabled,
                 numericOnlyMode = numericOnlyMode,
+                targetDigitLength = targetDigitLength,
                 onToggleNumericOnlyMode = onToggleNumericOnlyMode,
+                onToggleExact10Digits = onToggleExact10Digits,
+                onOpenDigitLengthSelector = onOpenDigitLengthSelector,
                 onToggleAutoScan = onToggleAutoScan,
                 onBarcodeDetected = onBarcodeDetected
             )
@@ -550,6 +594,24 @@ fun ScannerTabContent(
                         fontSize = 12.sp,
                         fontWeight = FontWeight.ExtraBold,
                         color = Color.White
+                    )
+                }
+
+                // Digit Length Lock button (e.g. Kunci 10 Angka)
+                IconButton(
+                    onClick = onOpenDigitLengthSelector,
+                    modifier = Modifier
+                        .size(38.dp)
+                        .testTag("top_digit_lock_toggle"),
+                    colors = IconButtonDefaults.iconButtonColors(
+                        containerColor = if (targetDigitLength != null) Color(0xFF0F766E) else Color(0x33FFFFFF),
+                        contentColor = Color.White
+                    )
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Lock,
+                        contentDescription = "Kunci Jumlah Angka Barcode",
+                        modifier = Modifier.size(18.dp)
                     )
                 }
 
@@ -694,6 +756,34 @@ fun ScannerTabContent(
                     )
                 }
             }
+
+            Surface(
+                shape = RoundedCornerShape(12.dp),
+                color = if (targetDigitLength == 10) Color(0xE00F766E) else if (targetDigitLength != null) Color(0xE01E293B) else Color(0xAA334155),
+                modifier = Modifier
+                    .clip(RoundedCornerShape(12.dp))
+                    .clickable { onOpenDigitLengthSelector() }
+                    .testTag("status_pill_target_digits")
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Lock,
+                        contentDescription = null,
+                        tint = if (targetDigitLength != null) Color(0xFF5EEAD4) else Color.White,
+                        modifier = Modifier.size(12.dp)
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(
+                        text = if (targetDigitLength == 10) "🎯 Kunci 10 Angka" else if (targetDigitLength != null) "🎯 Kunci $targetDigitLength Angka" else "🎯 Kunci: Bebas",
+                        color = Color.White,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+            }
         }
 
         // Subtitle Tip Overlay
@@ -783,6 +873,96 @@ fun ScannerTabContent(
                         ) {
                             Text(
                                 text = "Abaikan",
+                                color = Color.White,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        // Length Mismatch Warning Pop-up Banner (Missing or extra digits rejected!)
+        AnimatedVisibility(
+            visible = lengthMismatchCode != null,
+            enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),
+            exit = slideOutVertically(targetOffsetY = { it }) + fadeOut(),
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .padding(start = 16.dp, end = 16.dp, bottom = 148.dp)
+        ) {
+            lengthMismatchCode?.let { (detectedCode, expectedLen) ->
+                Card(
+                    shape = RoundedCornerShape(16.dp),
+                    colors = CardDefaults.cardColors(containerColor = Color(0xF07F1D1D)),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 8.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onDismissLengthMismatch() }
+                        .testTag("length_mismatch_banner")
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(14.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Surface(
+                            shape = CircleShape,
+                            color = Color(0xFFDC2626),
+                            modifier = Modifier.size(38.dp)
+                        ) {
+                            Box(contentAlignment = Alignment.Center) {
+                                Icon(
+                                    imageVector = Icons.Default.WarningAmber,
+                                    contentDescription = null,
+                                    tint = Color.White,
+                                    modifier = Modifier.size(22.dp)
+                                )
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.width(12.dp))
+
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "⚠️ Barcode Ditolak: Wajib Tepat $expectedLen Angka",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = Color(0xFFFCA5A5),
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                text = "Terbaca ${detectedCode.length} digit: \"$detectedCode\"",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontFamily = FontFamily.Monospace,
+                                color = Color.White,
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Text(
+                                text = if (detectedCode.length < expectedLen) {
+                                    "Kurang ${expectedLen - detectedCode.length} digit. Pastikan seluruh garis barcode masuk kotak scanner."
+                                } else {
+                                    "Kelebihan ${detectedCode.length - expectedLen} digit dari batas $expectedLen digit."
+                                },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = Color.White.copy(alpha = 0.85f),
+                                fontSize = 11.sp
+                            )
+                        }
+
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = Color(0x33FFFFFF),
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(8.dp))
+                                .clickable { onDismissLengthMismatch() }
+                        ) {
+                            Text(
+                                text = "Tutup",
                                 color = Color.White,
                                 fontSize = 12.sp,
                                 fontWeight = FontWeight.SemiBold,
@@ -964,6 +1144,8 @@ fun DataListTabContent(
     onTogglePreventDuplicates: () -> Unit,
     soundEnabled: Boolean,
     onToggleSound: () -> Unit,
+    targetDigitLength: Int? = null,
+    onOpenDigitLengthSelector: () -> Unit = {},
     onEditItem: (BarcodeEntity) -> Unit,
     onDeleteItem: (BarcodeEntity) -> Unit,
     onQuantityChange: (Long, Int) -> Unit,
@@ -1085,6 +1267,34 @@ fun DataListTabContent(
                         fontSize = 11.sp,
                         fontWeight = FontWeight.Bold,
                         color = if (soundEnabled) MaterialTheme.colorScheme.onSecondaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+
+            Surface(
+                shape = RoundedCornerShape(8.dp),
+                color = if (targetDigitLength != null) MaterialTheme.colorScheme.tertiaryContainer else MaterialTheme.colorScheme.surfaceVariant,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(8.dp))
+                    .clickable { onOpenDigitLengthSelector() }
+                    .testTag("list_tab_digit_rule_pill")
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Lock,
+                        contentDescription = null,
+                        tint = if (targetDigitLength != null) MaterialTheme.colorScheme.onTertiaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(13.dp)
+                    )
+                    Spacer(modifier = Modifier.width(5.dp))
+                    Text(
+                        text = if (targetDigitLength == 10) "🎯 Tepat 10 Digit: ON" else if (targetDigitLength != null) "🎯 Tepat $targetDigitLength Digit" else "🎯 Kunci: Bebas",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = if (targetDigitLength != null) MaterialTheme.colorScheme.onTertiaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
             }

@@ -54,10 +54,12 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.QrCode
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.TextFields
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.WarningAmber
 import androidx.compose.material.icons.filled.ZoomIn
 import androidx.compose.material3.Button
@@ -123,7 +125,10 @@ fun CameraScannerView(
     useFrontCamera: Boolean = false,
     autoScanEnabled: Boolean = true,
     numericOnlyMode: Boolean = false,
+    targetDigitLength: Int? = null,
     onToggleNumericOnlyMode: () -> Unit = {},
+    onToggleExact10Digits: () -> Unit = {},
+    onOpenDigitLengthSelector: () -> Unit = {},
     onToggleAutoScan: () -> Unit = {},
     onBarcodeDetected: (code: String, format: String) -> Unit
 ) {
@@ -163,6 +168,9 @@ fun CameraScannerView(
     }
     LaunchedEffect(numericOnlyMode, currentAnalyzer) {
         currentAnalyzer?.numericOnlyMode = numericOnlyMode
+    }
+    LaunchedEffect(targetDigitLength, currentAnalyzer) {
+        currentAnalyzer?.targetDigitLength = targetDigitLength
     }
 
     // Toggle torch when state changes
@@ -218,7 +226,13 @@ fun CameraScannerView(
                     !it.rawValue.isNullOrBlank() && BarcodeAnalyzer.isValidBarcode(it.rawValue!!, it.format)
                 }
 
-                val chosenBarcode = if (numericOnlyMode) {
+                val chosenBarcode = if (targetDigitLength != null) {
+                    val reqLen = targetDigitLength
+                    validList.firstOrNull {
+                        val code = BarcodeAnalyzer.cleanBarcodeValue(it.rawValue ?: "", it.format)
+                        code.length == reqLen && code.all { ch -> ch.isDigit() }
+                    }
+                } else if (numericOnlyMode) {
                     validList.firstOrNull {
                         val code = BarcodeAnalyzer.cleanBarcodeValue(it.rawValue ?: "", it.format)
                         code.isNotEmpty() && code.all { ch -> ch.isDigit() }
@@ -246,6 +260,13 @@ fun CameraScannerView(
                         }
                     }
                 } else {
+                    // Check if a barcode was actually found but rejected because length != targetDigitLength
+                    val mismatchBarcode = if (targetDigitLength != null) {
+                        validList.firstOrNull()?.let {
+                            BarcodeAnalyzer.cleanBarcodeValue(it.rawValue ?: "", it.format)
+                        }
+                    } else null
+
                     // If barcode line not decoded, search OCR exclusively for the barcode numeric string
                     // (e.g. "* 4 7 6 2 6 0 4 8 3 9 *" printed directly under the barcode)
                     textRecognizer.process(inputImage)
@@ -254,11 +275,18 @@ fun CameraScannerView(
                             for (block in visionText.textBlocks) {
                                 for (line in block.lines) {
                                     val text = line.text.trim()
-                                    // Check if line looks like "* 4 7 6 2 6 0 4 8 3 9 *" or "4762604839"
                                     val digitsOnly = text.filter { it.isDigit() }
-                                    if (digitsOnly.length in 6..24 && (text.contains("*") || digitsOnly.length >= 8)) {
-                                        foundNumericBarcode = digitsOnly
-                                        break
+                                    if (targetDigitLength != null) {
+                                        if (digitsOnly.length == targetDigitLength) {
+                                            foundNumericBarcode = digitsOnly
+                                            break
+                                        }
+                                    } else {
+                                        // Check if line looks like "* 4 7 6 2 6 0 4 8 3 9 *" or "4762604839"
+                                        if (digitsOnly.length in 6..24 && (text.contains("*") || digitsOnly.length >= 8)) {
+                                            foundNumericBarcode = digitsOnly
+                                            break
+                                        }
                                     }
                                 }
                                 if (foundNumericBarcode != null) break
@@ -276,7 +304,14 @@ fun CameraScannerView(
                                     }
                                 }
                             } else {
-                                freezeFailedMessage = "Garis barcode belum terdeteksi jelas. Posisikan barcode di dalam kotak bidik."
+                                freezeFailedMessage = when {
+                                    mismatchBarcode != null && targetDigitLength != null ->
+                                        "Barcode ditolak: Terdeteksi ${mismatchBarcode.length} digit. Mode wajib tepat $targetDigitLength angka!"
+                                    targetDigitLength != null ->
+                                        "Tidak ditemukan barcode tepat $targetDigitLength angka. Posisikan barcode di dalam kotak bidik."
+                                    else ->
+                                        "Garis barcode belum terdeteksi jelas. Posisikan barcode di dalam kotak bidik."
+                                }
                                 isProcessingFreeze = false
                             }
                         }
@@ -398,6 +433,7 @@ fun CameraScannerView(
                 ).apply {
                     this.autoScanEnabled = autoScanEnabled
                     this.numericOnlyMode = numericOnlyMode
+                    this.targetDigitLength = targetDigitLength
                 }
                 currentAnalyzer = analyzer
 
@@ -529,7 +565,7 @@ fun CameraScannerView(
             )
         }
 
-        // 5. Frozen Status Badge at Top
+        // 5. Frozen Status Badge at Top or Target Digit Length Banner
         AnimatedVisibility(
             visible = frozenBitmap != null,
             enter = fadeIn() + slideInVertically { -it },
@@ -556,6 +592,44 @@ fun CameraScannerView(
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
                         text = "📸 KAMERA DIJEDA (GAMBAR DIAM)",
+                        color = Color.White,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+        }
+
+        AnimatedVisibility(
+            visible = frozenBitmap == null && targetDigitLength != null,
+            enter = fadeIn() + slideInVertically { -it },
+            exit = fadeOut() + slideOutVertically { -it },
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .padding(top = 96.dp)
+        ) {
+            Surface(
+                shape = RoundedCornerShape(16.dp),
+                color = Color(0xEE042F2E),
+                border = BorderStroke(1.dp, Color(0xFF14B8A6)),
+                modifier = Modifier
+                    .clip(RoundedCornerShape(16.dp))
+                    .clickable { onOpenDigitLengthSelector() }
+                    .testTag("banner_target_digit_active")
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Lock,
+                        contentDescription = null,
+                        tint = Color(0xFF2DD4BF),
+                        modifier = Modifier.size(14.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = "🎯 WAJIB $targetDigitLength ANGKA (Mencegah Angka Kurang/Lebih)",
                         color = Color.White,
                         fontSize = 11.sp,
                         fontWeight = FontWeight.Bold
@@ -624,6 +698,70 @@ fun CameraScannerView(
                                 fontWeight = if (numericOnlyMode) FontWeight.Bold else FontWeight.Medium,
                                 modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
                             )
+                        }
+                    }
+
+                    // Row: Kunci 10 Angka (User requested: Cegah kekurangan/kelebihan angka barcode)
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Surface(
+                            shape = RoundedCornerShape(14.dp),
+                            color = if (targetDigitLength == 10) Color(0xFF0F766E) else if (targetDigitLength != null) Color(0xFF1E293B) else Color(0xAA0F172A),
+                            border = BorderStroke(1.dp, if (targetDigitLength != null) Color(0xFF2DD4BF) else Color(0x33FFFFFF)),
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(14.dp))
+                                .clickable { onToggleExact10Digits() }
+                                .testTag("toggle_exact_10_digits_mode")
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Lock,
+                                    contentDescription = null,
+                                    tint = if (targetDigitLength != null) Color(0xFF5EEAD4) else Color.White.copy(alpha = 0.7f),
+                                    modifier = Modifier.size(13.dp)
+                                )
+                                Spacer(modifier = Modifier.width(5.dp))
+                                Text(
+                                    text = if (targetDigitLength == 10) "🎯 Kunci 10 Angka: AKTIF" else if (targetDigitLength != null) "🎯 Kunci $targetDigitLength Angka: AKTIF" else "🎯 Kunci 10 Angka: OFF",
+                                    color = Color.White,
+                                    fontSize = 11.sp,
+                                    fontWeight = if (targetDigitLength != null) FontWeight.Bold else FontWeight.Medium
+                                )
+                            }
+                        }
+
+                        Surface(
+                            shape = RoundedCornerShape(14.dp),
+                            color = Color(0xAA0F172A),
+                            border = BorderStroke(1.dp, Color(0x33FFFFFF)),
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(14.dp))
+                                .clickable { onOpenDigitLengthSelector() }
+                                .testTag("btn_open_digit_selector")
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Tune,
+                                    contentDescription = null,
+                                    tint = Color.White,
+                                    modifier = Modifier.size(13.dp)
+                                )
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text(
+                                    text = "Atur",
+                                    color = Color.White,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Medium
+                                )
+                            }
                         }
                     }
 

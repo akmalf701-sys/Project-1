@@ -95,6 +95,11 @@ class BarcodeViewModel(
     private val _numericOnlyMode = MutableStateFlow(false)
     val numericOnlyMode = _numericOnlyMode.asStateFlow()
 
+    // Strict Target Digit Length Filter (e.g. 10 for exactly 10 digits, null for any length)
+    // Eliminates missing digits (<10) or extra digits (>10)
+    private val _targetDigitLength = MutableStateFlow<Int?>(null)
+    val targetDigitLength = _targetDigitLength.asStateFlow()
+
     // Event notifications for UI (e.g. snackbar or dialog when item scanned)
     private val _scanEvent = MutableSharedFlow<BarcodeEntity>()
     val scanEvent = _scanEvent.asSharedFlow()
@@ -102,6 +107,10 @@ class BarcodeViewModel(
     // Notification when duplicate barcode is scanned and rejected
     private val _duplicateEvent = MutableSharedFlow<String>()
     val duplicateEvent = _duplicateEvent.asSharedFlow()
+
+    // Notification when barcode is rejected due to length mismatch (code, expectedLength)
+    private val _lengthMismatchEvent = MutableSharedFlow<Pair<String, Int>>()
+    val lengthMismatchEvent = _lengthMismatchEvent.asSharedFlow()
 
     // Cooldown tracker to prevent duplicate floods in rapid succession
     private var lastScannedCode = ""
@@ -191,6 +200,26 @@ class BarcodeViewModel(
         _numericOnlyMode.value = !_numericOnlyMode.value
     }
 
+    /**
+     * Toggles exact 10-digit mode.
+     * When active, barcode MUST be exactly 10 digits to prevent incomplete or extra digits.
+     */
+    fun toggleExact10DigitsMode() {
+        if (_targetDigitLength.value == 10) {
+            _targetDigitLength.value = null
+        } else {
+            _targetDigitLength.value = 10
+            _numericOnlyMode.value = true
+        }
+    }
+
+    fun setTargetDigitLength(length: Int?) {
+        _targetDigitLength.value = length
+        if (length != null) {
+            _numericOnlyMode.value = true
+        }
+    }
+
     fun setSearchQuery(query: String) {
         _searchQuery.value = query
     }
@@ -209,8 +238,21 @@ class BarcodeViewModel(
         // Auto-correct optical near-numeric misreads if predominately numeric
         trimmedCode = BarcodeAnalyzer.autoCorrectNearNumericCode(trimmedCode)
 
-        // If numeric only mode is active, strictly reject barcodes containing letters
-        if (_numericOnlyMode.value && !trimmedCode.all { it.isDigit() }) {
+        // If target digit length is set (e.g. 10 digits), strictly enforce exact digit length
+        val targetLen = _targetDigitLength.value
+        if (targetLen != null) {
+            val digitsOnly = trimmedCode.filter { it.isDigit() }
+            if (trimmedCode.length != targetLen || !trimmedCode.all { it.isDigit() }) {
+                // Reject barcode that is missing digits (<10) or has extra digits (>10)
+                playDuplicateBeep()
+                triggerHapticFeedback(isError = true)
+                viewModelScope.launch {
+                    _lengthMismatchEvent.emit(Pair(trimmedCode, targetLen))
+                }
+                return
+            }
+            trimmedCode = digitsOnly
+        } else if (_numericOnlyMode.value && !trimmedCode.all { it.isDigit() }) {
             return
         }
 
@@ -337,7 +379,13 @@ class BarcodeViewModel(
                         !it.rawValue.isNullOrBlank() && BarcodeAnalyzer.isValidBarcode(it.rawValue!!, it.format)
                     }
 
-                    val chosen = if (_numericOnlyMode.value) {
+                    val targetLen = _targetDigitLength.value
+                    val chosen = if (targetLen != null) {
+                        validList.firstOrNull {
+                            val code = BarcodeAnalyzer.cleanBarcodeValue(it.rawValue ?: "", it.format)
+                            code.length == targetLen && code.all { ch -> ch.isDigit() }
+                        }
+                    } else if (_numericOnlyMode.value) {
                         validList.firstOrNull {
                             val code = BarcodeAnalyzer.cleanBarcodeValue(it.rawValue ?: "", it.format)
                             code.isNotEmpty() && code.all { ch -> ch.isDigit() }
@@ -376,10 +424,18 @@ class BarcodeViewModel(
                                     for (line in block.lines) {
                                         val text = line.text.trim()
                                         val digitsOnly = text.filter { it.isDigit() }
-                                        // Match line containing barcode numbers (usually with * delimiters or pure 8+ digits)
-                                        if (digitsOnly.length in 6..24 && (text.contains("*") || digitsOnly.length >= 8)) {
-                                            foundNumericCode = digitsOnly
-                                            break
+                                        if (targetLen != null) {
+                                            // Must match exact target digit length (e.g. exactly 10 digits)
+                                            if (digitsOnly.length == targetLen) {
+                                                foundNumericCode = digitsOnly
+                                                break
+                                            }
+                                        } else {
+                                            // Match line containing barcode numbers (usually with * delimiters or pure 8+ digits)
+                                            if (digitsOnly.length in 6..24 && (text.contains("*") || digitsOnly.length >= 8)) {
+                                                foundNumericCode = digitsOnly
+                                                break
+                                            }
                                         }
                                     }
                                     if (foundNumericCode != null) break
@@ -400,7 +456,11 @@ class BarcodeViewModel(
                                         }
                                     }
                                 } else {
-                                    onResult(false, "Barcode tidak terdeteksi di gambar ini.")
+                                    if (targetLen != null) {
+                                        onResult(false, "Tidak ditemukan barcode dengan tepat $targetLen angka pada foto ini.")
+                                    } else {
+                                        onResult(false, "Barcode tidak terdeteksi di gambar ini.")
+                                    }
                                 }
                             }
                             .addOnFailureListener {
